@@ -1,0 +1,15 @@
+/*
+
+命令参考:http://blog.csdn.net/luanlouis/article/details/42425105   http://www.cnblogs.com/jeffwongishandsome/archive/2011/11/06/2238265.html
+item失效和lru爬虫线程:http://blog.csdn.net/luotuo44/article/details/42963793
+slabclass结构图，图形画理解参考:http://blog.csdn.net/yxnyxnyxnyxnyxn/article/details/7869900
+命令
+set yiibai 0 0 9
+memcached
+STORED
+get yiibai
+VALUE yiibai 0 9
+memcached
+END
+
+*/
