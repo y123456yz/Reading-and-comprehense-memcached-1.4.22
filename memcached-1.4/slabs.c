@@ -160,6 +160,14 @@ void slabs_init(const size_t limit, const double factor, const bool prealloc) {
 	//slabclass数组中的第一个元素并不使用
 	//settings.item_size_max是memecached支持的最大item尺寸，默认为1M
 	//也就是网上所说的memcahced存储的数据最大为1MB
+
+    //slabs_init
+	//每个slab默认为1M，第一个1M空间的slab最小chunk对应的size就为48字节，1M空间最多有1M/48个chunk，
+	//第二个1M空间的slab chunk对应的size就为48*factor字节，1M空间最多有1M/(48*factor)个chunk，
+	//最大的chunk的限制为不能超过48*(factor的POWER_LARGEST次)并且最大chunk不能超过1M
+
+	//真正的内存分配是在KV对进来的时候出发一次性分配1M空间，或者当一个1M slab用完的时候，需要再次分配一个1M空间的
+	//该类型chunk的时候分配空间。真正内存分配的函数为do_slabs_newslab
     while (++i < POWER_LARGEST && size <= settings.item_size_max / factor) {
         /* Make sure items are always n-byte aligned */
         if (size % CHUNK_ALIGN_BYTES) //8字节对齐
@@ -252,6 +260,15 @@ static void split_slab_page_into_freelist(char *ptr, const unsigned int id) {
         ptr += p->size;
     }
 }
+
+//slabs_init
+//每个slab默认为1M，第一个1M空间的slab最小chunk对应的size就为48字节，1M空间最多有1M/48个chunk，
+//第二个1M空间的slab chunk对应的size就为48*factor字节，1M空间最多有1M/(48*factor)个chunk，
+//最大的chunk的限制为不能超过48*(factor的POWER_LARGEST次)并且最大chunk不能超过1M
+
+//真正的内存分配是在KV对进来的时候出发一次性分配1M空间，或者当一个1M slab用完的时候，需要再次分配一个1M空间的
+//该类型chunk的时候分配空间。真正内存分配的函数为do_slabs_newslab
+
 
 //slabclass_t中slab的数目是慢慢增多的。该函数的作用是为slabclass_t申请多一个slab
 //参数id指明是slabclass数组中的那个slabclass_t

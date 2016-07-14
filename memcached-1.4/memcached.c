@@ -3681,7 +3681,7 @@ static void process_command(conn *c, char *command) {
 	//对于命令"get tk"，那么token[0].value等于指向"get"的开始位置
 	//tokens[1].value则指向"tk"的开始位置
 	if (ntokens >= 3 &&
-        ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) ||
+        ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) || //get gets都可以一次获取多个KEY-VALUE
          (strcmp(tokens[COMMAND_TOKEN].value, "bget") == 0))) {
 
         process_get_command(c, tokens, ntokens, false);
@@ -3707,7 +3707,7 @@ static void process_command(conn *c, char *command) {
 
         process_arithmetic_command(c, tokens, ntokens, 1);
 
-    } else if (ntokens >= 3 && (strcmp(tokens[COMMAND_TOKEN].value, "gets") == 0)) {
+    } else if (ntokens >= 3 && (strcmp(tokens[COMMAND_TOKEN].value, "gets") == 0)) { //get gets都可以一次获取多个KEY-VALUE
 
         process_get_command(c, tokens, ntokens, true);
 
