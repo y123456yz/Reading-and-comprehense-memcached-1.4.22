@@ -31,7 +31,7 @@ typedef struct {  //可以参考slabs_init
 
 	//指向空闲item链表
     void *slots;           /* list of item ptrs */
-	//空闲item的个数  每取走一个item减1，见do_slabs_alloc
+	//空闲item的个数  每取走一个item减1，见do_slabs_alloc   一般都是客户端get超时的kv的时候会把这个item标记为未使用，
     unsigned int sl_curr;   /* total free items in list */
 
 	//这个是已经分配了内存的slabs个数。list_size是这个slab数组(slab_list)的大小
@@ -452,6 +452,16 @@ STAT total_malloced 2097024
 END
 */
 /*@null@*/
+
+
+/*
+STAT 2:chunk_size 120   一个slabs中包含多个chunk，每个chunk的大小
+STAT 2:chunks_per_page 8738 一个slabs中有多少个120字节的chunk块，chunk_size * chunks_per_page = 1M
+STAT 2:total_pages 221 一共开辟了多少个slabs，也就是开辟了多少个1M的空间
+STAT 2:total_chunks 1931098 总chunk数，一个slab有chunks_per_page个chunk块，total_pages个slab就有total_pages * chunks_per_page这么多个chunk
+STAT 2:used_chunks 1931067  总共用了多少个chunk，
+STAT 2:free_chunks 31  生效多少个chunk没用，used_chunks + free_chunks = total_chunks
+*/
 static void do_slabs_stats(ADD_STAT add_stats, void *c) {
     int i, total;
     /* Get the per-thread stats which contain some interesting aggregates */
@@ -473,10 +483,10 @@ static void do_slabs_stats(ADD_STAT add_stats, void *c) {
             APPEND_NUM_STAT(i, "chunk_size", "%u", p->size);
             APPEND_NUM_STAT(i, "chunks_per_page", "%u", perslab);
             APPEND_NUM_STAT(i, "total_pages", "%u", slabs);
-            APPEND_NUM_STAT(i, "total_chunks", "%u", slabs * perslab);
+            APPEND_NUM_STAT(i, "total_chunks", "%u", slabs * perslab); 
             APPEND_NUM_STAT(i, "used_chunks", "%u",
-                            slabs*perslab - p->sl_curr);
-            APPEND_NUM_STAT(i, "free_chunks", "%u", p->sl_curr);
+                            slabs*perslab - p->sl_curr); //
+            APPEND_NUM_STAT(i, "free_chunks", "%u", p->sl_curr); //这个一般是客户端get过期KV的时候，腾出来的可用item
             /* Stat is dead, but displaying zero instead of removing it. */
             APPEND_NUM_STAT(i, "free_chunks_end", "%u", 0);
             APPEND_NUM_STAT(i, "mem_requested", "%llu",

@@ -40,6 +40,19 @@ typedef struct { //结构属于itemstats[]
     uint64_t lrutail_reflocked;//申请item而搜索LRU队列时，被其他worker线程引用的item数量  
 } itemstats_t; //item的状态统计信息，这里就不分析了
 
+/*
+为什么要把item插入到LRU队列头部呢？当然实现简单是其中一个原因。但更重要的是这是一个LRU队列！！还记得操作系统里面的LRU吧。
+这是一种淘汰机制。在LRU队列中，排得越靠后就认为是越少使用的item，此时被淘汰的几率就越大。所以新鲜item(访问时间新)，要排
+在不那么新鲜item的前面，所以插入LRU队列的头部是不二选择。下面的do_item_update函数佐证了这一点。do_item_update函数是先把
+旧的item从LRU队列中删除，然后再插入到LRU队列中(此时它在LRU队列中排得最前)。除了更新item在队列中的位置外，还会更新item的
+time成员，该成员指明上一次访问的时间(绝对时间)。如果不是为了LRU，那么do_item_update函数最简单的实现就是直接更新time成员即可。
+
+memcached处理get命令时会调用do_item_update函数更新item的访问时间，更新其在LRU队列的位置。在memcached中get命令是很频繁的命令，
+排在LRU队列第一或者前几的item更是频繁被get。对于排在前几名的item来说，调用do_item_update是意义不大的，因为调用do_item_update
+后其位置还是前几名，并且LRU淘汰再多item也难于淘汰不到它们(一个LRU队列的item数量是很多的)。另一方面，do_item_update函数耗时还
+是会有一定的耗时，因为要抢占cache_lock锁。如果频繁调用do_item_update函数性能将下降很多。于是memcached就是使用了更新间隔。
+*/
+
 //指向每一个LRU队列头  LRU队列可以参考http://blog.csdn.net/luotuo44/article/details/42869325
 //排在队列前面的表示最近被访问的key，排在head后面的则表示最近没访问该key，因为每次访问key都会把key-value对应的item取出来放到head头部，见do_item_update
 //lru队列里面的item是根据time降序排序的
@@ -385,7 +398,7 @@ static void item_unlink_q(item *it) {
     return;
 }
 
-////将item加入到hashtable并加入到对应classid的LRU链中。
+//将item加入到hashtable并加入到对应classid的LRU链中。
 int do_item_link(item *it, const uint32_t hv) {
     MEMCACHED_ITEM_LINK(ITEM_key(it), it->nkey, it->nbytes);
     assert((it->it_flags & (ITEM_LINKED|ITEM_SLABBED)) == 0);
@@ -644,26 +657,34 @@ void do_item_stats(ADD_STAT add_stats, void *c) {
                 /* We removed all of the items in this slab class */
                 continue;
             }
-            APPEND_NUM_FMT_STAT(fmt, i, "number", "%u", sizes[i]);
-            APPEND_NUM_FMT_STAT(fmt, i, "age", "%u", current_time - tails[i]->time);
+            APPEND_NUM_FMT_STAT(fmt, i, "number", "%u", sizes[i]); //item总数
+            APPEND_NUM_FMT_STAT(fmt, i, "age", "%u", current_time - tails[i]->time); //最后一次访问该slabs上的item离当前的时间
+            //过期失效的item没有找到，申请内存又失败了。这种情况下LRU强制淘汰一个item(即使这个item并没有过期失效)，统计强制淘汰的item数，参考do_item_alloc
             APPEND_NUM_FMT_STAT(fmt, i, "evicted",
                                 "%llu", (unsigned long long)itemstats[i].evicted);
+            //即使一个item的exptime成员设置为永不超时(0)，还是会被踢的  
             APPEND_NUM_FMT_STAT(fmt, i, "evicted_nonzero",
                                 "%llu", (unsigned long long)itemstats[i].evicted_nonzero);
             APPEND_NUM_FMT_STAT(fmt, i, "evicted_time",
-                                "%u", itemstats[i].evicted_time);
+                                "%u", itemstats[i].evicted_time); //最后一次踢item时，被踢的item已经过期多久了  
             APPEND_NUM_FMT_STAT(fmt, i, "outofmemory",
-                                "%llu", (unsigned long long)itemstats[i].outofmemory);
+                                "%llu", (unsigned long long)itemstats[i].outofmemory); //如果不进行LRU淘汰，当内存用完后则会分配内存失败，这里记录分配失败的次数
+            //需要修复的item数量(除非worker线程有问题否则一般为0)
             APPEND_NUM_FMT_STAT(fmt, i, "tailrepairs",
                                 "%llu", (unsigned long long)itemstats[i].tailrepairs);
+            //因为国企了，该item被重复使用的次数，赋值见do_item_alloc  //在申请item时，发现过期并回收的item数量  
             APPEND_NUM_FMT_STAT(fmt, i, "reclaimed",
                                 "%llu", (unsigned long long)itemstats[i].reclaimed);
+            //被访问过并且超时的item,赋值见do_item_alloc
             APPEND_NUM_FMT_STAT(fmt, i, "expired_unfetched",
                                 "%llu", (unsigned long long)itemstats[i].expired_unfetched);
+            //直到被LRU踢出时都还没有被访问过的item数量  
             APPEND_NUM_FMT_STAT(fmt, i, "evicted_unfetched",
                                 "%llu", (unsigned long long)itemstats[i].evicted_unfetched);
+            //被LRU爬虫发现的过期item数量  
             APPEND_NUM_FMT_STAT(fmt, i, "crawler_reclaimed",
                                 "%llu", (unsigned long long)itemstats[i].crawler_reclaimed);
+            //申请item而搜索LRU队列时，被其他worker线程引用的item数量  
             APPEND_NUM_FMT_STAT(fmt, i, "lrutail_reflocked",
                                 "%llu", (unsigned long long)itemstats[i].lrutail_reflocked);
         }
