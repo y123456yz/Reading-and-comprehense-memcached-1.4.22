@@ -65,7 +65,7 @@ static int try_read_command(conn *c);
 enum try_read_result {
     READ_DATA_RECEIVED,
     READ_NO_DATA_RECEIVED,
-    READ_ERROR,            /** an error occured (on the socket) (or client closed connection) */
+    READ_ERROR,            /** an error occurred (on the socket) (or client closed connection) */
     READ_MEMORY_ERROR      /** failed to allocate more memory */
 };
 
@@ -101,8 +101,8 @@ static void write_bin_error(conn *c, protocol_binary_response_status err,
 static void conn_free(conn *c);
 
 /** exported globals **/
-struct stats_t stats;
-struct settings_s settings;
+struct stats stats;
+struct settings settings;
 time_t process_started;     /* when the process was started */
 conn **conns; //conn数组，提前分配好，见conn_init
 
@@ -184,9 +184,12 @@ static void stats_init(void) {
     stats.hash_power_level = stats.hash_bytes = stats.hash_is_expanding = 0;
     stats.expired_unfetched = stats.evicted_unfetched = 0;
     stats.slabs_moved = 0;
+    stats.lru_maintainer_juggles = 0;
     stats.accepting_conns = true; /* assuming we start in this state. */
     stats.slab_reassign_running = false;
     stats.lru_crawler_running = false;
+    stats.lru_crawler_starts = 0;
+    stats.time_in_listen_disabled_us = 0;
 
     /* make the time we started always be 2 seconds before we really
        did, so time(0) - time.started is never zero.  if so, things
@@ -236,8 +239,8 @@ static void settings_init(void) {
 
 	//flush_all命令的时间界限。插入时间小于这个时间的item删除
     settings.oldest_live = 0;
-
-	//标记memcached是否允许LRU淘汰机制。默认是可以的。可以通过-M选项禁止
+    settings.oldest_cas = 0;          /* supplements accuracy of oldest_live */
+  //标记memcached是否允许LRU淘汰机制。默认是可以的。可以通过-M选项禁止
     settings.evict_to_free = 1;       /* push old items out of cache when memory runs out */
 
 	//unix_socket监听的socket路径，默认不使用unix_socket
@@ -286,12 +289,14 @@ static void settings_init(void) {
 
 	//LRU爬虫检测每条LRU队列中的多少个item，如果想让LRU爬虫工作必须修改这个值
     settings.lru_crawler_tocrawl = 0;
-
-	//哈希表的长度是2^n。这个值是n的初始值。可以在启动memcached的时候通过-o hashpower_init设置
+    settings.lru_maintainer_thread = false;
+    settings.hot_lru_pct = 32;
+    settings.warm_lru_pct = 32;
+    settings.expirezero_does_not_evict = false;
+		//哈希表的长度是2^n。这个值是n的初始值。可以在启动memcached的时候通过-o hashpower_init设置
 	//设置的值要在[12,64]之间。如果不设置，该值为0.哈希表的幂将取默认值16
     settings.hashpower_init = 0;
-
-	//是否开启调节不同类型item所占用的内存数。可以通过-o slab_reassign选项开启
+//是否开启调节不同类型item所占用的内存数。可以通过-o slab_reassign选项开启
     settings.slab_reassign = false;
 
 	//自动检测是否需要进行不同类型item的内存调整，依赖于setting.slab_reassign的开启
@@ -304,9 +309,7 @@ static void settings_init(void) {
 	//那么这个item就永远被这个已死的线程所引用而不能释放。memcached用这个值来检测是否出现这种
 	//情况。因为这种情况很少发生，所以该变量的默认值为0，即不进行检测
     settings.tail_repair_time = TAIL_REPAIR_TIME_DEFAULT;
-
-	//是否允许客户端使用flush_all命令 
-    settings.flush_enabled = true;
+    settings.crawls_persleep = 1000;
 }
 
 /*
@@ -777,7 +780,6 @@ static void conn_set_state(conn *c, enum conn_states state) {
 static int ensure_iov_space(conn *c) {
     assert(c != NULL);
 
-	//已经使用完了之前申请的
     if (c->iovused >= c->iovsize) {
         int i, iovnum;
         struct iovec *new_iov = (struct iovec *)realloc(c->iov,
@@ -849,7 +851,6 @@ static int add_iov(conn *c, const void *buf, int len) {
         }
 
         m = &c->msglist[c->msgused - 1];
-
 		//用一个iovec结构体指向要回应的数据
         m->msg_iov[m->msg_iovlen].iov_base = (void *)buf;
         m->msg_iov[m->msg_iovlen].iov_len = len;
@@ -917,10 +918,10 @@ static void out_string(conn *c, const char *str) {
 
     assert(c != NULL);
 
-    if (c->noreply) { //不需要回复信息给客户端  
+    if (c->noreply) {
         if (settings.verbose > 1)
             fprintf(stderr, ">%d NOREPLY %s\n", c->sfd, str);
-        c->noreply = false;//重置  
+        c->noreply = false;
         conn_set_state(c, conn_new_cmd);
         return;
     }
@@ -935,7 +936,7 @@ static void out_string(conn *c, const char *str) {
     add_msghdr(c);
 
     len = strlen(str);
-    if ((len + 2) > c->wsize) {///2是后面的\r\n  
+    if ((len + 2) > c->wsize) {
         /* ought to be always enough. just fail for simplicity */
         str = "SERVER_ERROR output line too long";
         len = strlen(str);
@@ -982,7 +983,7 @@ static void complete_nread_ascii(conn *c) {
     enum store_item_type ret;
 
     pthread_mutex_lock(&c->thread->stats.mutex);
-    c->thread->stats.slab_stats[it->slabs_clsid].set_cmds++;
+    c->thread->stats.slab_stats[ITEM_clsid(it)].set_cmds++;
     pthread_mutex_unlock(&c->thread->stats.mutex);
 
     if (strncmp(ITEM_data(it) + it->nbytes - 2, "\r\n", 2) != 0) { //value对应的data后面必须携带\r\n2个字符
@@ -1292,7 +1293,7 @@ static void complete_update_bin(conn *c) {
     item *it = c->item;
 
     pthread_mutex_lock(&c->thread->stats.mutex);
-    c->thread->stats.slab_stats[it->slabs_clsid].set_cmds++;
+    c->thread->stats.slab_stats[ITEM_clsid(it)].set_cmds++;
     pthread_mutex_unlock(&c->thread->stats.mutex);
 
     /* We don't actually receive the trailing two characters in the bin
@@ -1391,10 +1392,10 @@ static void process_bin_get_or_touch(conn *c) {
         pthread_mutex_lock(&c->thread->stats.mutex);
         if (should_touch) {
             c->thread->stats.touch_cmds++;
-            c->thread->stats.slab_stats[it->slabs_clsid].touch_hits++;
+            c->thread->stats.slab_stats[ITEM_clsid(it)].touch_hits++;
         } else {
             c->thread->stats.get_cmds++;
-            c->thread->stats.slab_stats[it->slabs_clsid].get_hits++;
+            c->thread->stats.slab_stats[ITEM_clsid(it)].get_hits++;
         }
         pthread_mutex_unlock(&c->thread->stats.mutex);
 
@@ -1963,7 +1964,7 @@ static void dispatch_bin_command(conn *c) {
         c->cmd = PROTOCOL_BINARY_CMD_GAT;
         break;
     case PROTOCOL_BINARY_CMD_GATKQ:
-        c->cmd = PROTOCOL_BINARY_CMD_GAT;
+        c->cmd = PROTOCOL_BINARY_CMD_GATK;
         break;
     default:
         c->noreply = false;
@@ -2233,6 +2234,7 @@ static void process_bin_append_prepend(conn *c) {
 static void process_bin_flush(conn *c) {
     time_t exptime = 0;
     protocol_binary_request_flush* req = binary_get_request(c);
+    rel_time_t new_oldest = 0;
 
     if (!settings.flush_enabled) {
       // flush_all is not allowed but we log it on stats
@@ -2245,11 +2247,17 @@ static void process_bin_flush(conn *c) {
     }
 
     if (exptime > 0) {
-        settings.oldest_live = realtime(exptime) - 1;
+        new_oldest = realtime(exptime);
     } else {
-        settings.oldest_live = current_time - 1;
+        new_oldest = current_time;
     }
-    item_flush_expired();
+    if (settings.use_cas) {
+        settings.oldest_live = new_oldest - 1;
+        if (settings.oldest_live <= current_time)
+            settings.oldest_cas = get_cas_id();
+    } else {
+        settings.oldest_live = new_oldest;
+    }
 
     pthread_mutex_lock(&c->thread->stats.mutex);
     c->thread->stats.flush_cmds++;
@@ -2287,7 +2295,7 @@ static void process_bin_delete(conn *c) {
         if (cas == 0 || cas == ITEM_get_cas(it)) {
             MEMCACHED_COMMAND_DELETE(c->sfd, ITEM_key(it), it->nkey);
             pthread_mutex_lock(&c->thread->stats.mutex);
-            c->thread->stats.slab_stats[it->slabs_clsid].delete_hits++;
+            c->thread->stats.slab_stats[ITEM_clsid(it)].delete_hits++;
             pthread_mutex_unlock(&c->thread->stats.mutex);
             item_unlink(it);
             write_bin_response(c, NULL, 0, 0, 0);
@@ -2382,7 +2390,6 @@ static void complete_nread(conn *c) {
  * Returns the state of storage.
  */
 enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t hv) {
-//注意该函数外层在该函数执行完后一般会调用一次item_remove
     char *key = ITEM_key(it);
     item *old_it = do_item_get(key, it->nkey, hv);
     enum store_item_type stored = NOT_STORED;
@@ -2390,11 +2397,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
     item *new_it = NULL;
     int flags;
 
-    if(old_it)
-        printf("yang test ...........refcount:%d............<FUNC:%s, line:%u>\n", (int)old_it->refcount, __FUNCTION__, __LINE__);
-    if (old_it != NULL && comm == NREAD_ADD) { //
-        //因为已经有相同键值的旧item了，所以add命令使用失败。但  
-        //还是会刷新旧item的访问时间以及LRU队列中的位置  
+    if (old_it != NULL && comm == NREAD_ADD) {
         /* add only adds a nonexistent item, but promote to head of LRU */
         do_item_update(old_it); //如果add命令对应的key已经存在则更新该key的访问时间
     } else if (!old_it && (comm == NREAD_REPLACE
@@ -2410,20 +2413,19 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
             c->thread->stats.cas_misses++;
             pthread_mutex_unlock(&c->thread->stats.mutex);
         }
-        //执行cas存储时执行的判断逻辑，  
-        else if (ITEM_get_cas(it) == ITEM_get_cas(old_it)) { 
-            // cas validates//版本号cas值一致  
+        else if (ITEM_get_cas(it) == ITEM_get_cas(old_it)) {
+            // cas validates
             // it and old_it may belong to different classes.
             // I'm updating the stats for the one that's getting pushed out
             pthread_mutex_lock(&c->thread->stats.mutex);
-            c->thread->stats.slab_stats[old_it->slabs_clsid].cas_hits++;
+            c->thread->stats.slab_stats[ITEM_clsid(old_it)].cas_hits++;
             pthread_mutex_unlock(&c->thread->stats.mutex);
 
-            item_replace(old_it, it, hv);//执行存储逻辑  
+            item_replace(old_it, it, hv);
             stored = STORED;
-        } else {//版本号cas值不一致，不进行实际的存储  
+        } else {
             pthread_mutex_lock(&c->thread->stats.mutex);
-            c->thread->stats.slab_stats[old_it->slabs_clsid].cas_badval++;//更新统计信息  
+            c->thread->stats.slab_stats[ITEM_clsid(old_it)].cas_badval++;
             pthread_mutex_unlock(&c->thread->stats.mutex);
 
             if(settings.verbose > 1) {
@@ -2442,7 +2444,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
             /*
              * Validate CAS
              */
-            if (ITEM_get_cas(it) != 0) { //实际上只有cas命令process_update_command中才会设置cas，因此这里应该是不会进来的
+            if (ITEM_get_cas(it) != 0) {
                 // CAS much be equal
                 if (ITEM_get_cas(it) != ITEM_get_cas(old_it)) {
                     stored = EXISTS;
@@ -2454,7 +2456,7 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
                 /* flags was already lost - so recover them from ITEM_suffix(it) */
 
                 flags = (int) strtol(ITEM_suffix(old_it), (char **) NULL, 10);
-                //因为是追加数据，先前分配的item可能不够大，所以要重新申请item  
+
                 new_it = do_item_alloc(key, it->nkey, flags, old_it->exptime, it->nbytes + old_it->nbytes - 2 /* CRLF */, hv);
 
                 if (new_it == NULL) {
@@ -2476,48 +2478,31 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
                     memcpy(ITEM_data(new_it) + it->nbytes - 2 /* CRLF */, ITEM_data(old_it), old_it->nbytes);
                 }
 
-                //itt = it;
-                // slabs_get_curr(itt);
-                /*
-                  其实这里的it会在外层该函数外层调用item_remove去除和hash及lru的关联   old_it在该后面的do_item_remove取出和HASH LRU的关联
-                  
-                  例如在原有有set yang aaa;(这个就是old_item)，现在在执行append yang bbb(这个存储在该函数中的it参数)
-                  然后会重新申请一个item，把it指向该新的item。item_replace会把aaa对应的old_item从LRU和hash中摘除，然后
-                  把最终的aaabbb添加到hash和lru中。 但是之前存储bbb的item实际上是没有释放的，也存储在内存item中，
-                  但没有添加到LUR和hash中,aaabbb对应的item会加入hash和lru,所以最终只有aaabbb添加到了LRU和item中。aaa和bbb的item
-                  
-                */
-                it = new_it; //it重新指向new_it
+                it = new_it;
             }
         }
 
-        //add、set、replace命令还没处理,但之前已经处理了不合理的情况  
-        //即add命令已经确保了目前哈希表还没存储对应键值的item，replace命令  
-        //已经保证哈希表已经存储了对应键值的item  
         if (stored == NOT_STORED) {
-            if (old_it != NULL) {//replace和set append preappend命令会进入这里
-                item_replace(old_it, it, hv); //这里面会unlink old_it,然后link it
-            } else {//add和set命令会进入这里   
-                do_item_link(it, hv); //对于一个没有存在的key，使用set命令会来到这里   这里面会增加refcount计数，上面的new_it也会到这里
-            }
-            
+            if (old_it != NULL)
+                item_replace(old_it, it, hv);
+            else
+                do_item_link(it, hv);
+
             c->cas = ITEM_get_cas(it);
 
             stored = STORED;
         }
-    }   
-    
+    }
+
     if (old_it != NULL)
         do_item_remove(old_it);         /* release our reference */
-    if (new_it != NULL) //只有在追加的时候，之前的item空间不够才会开盘新的比之前大的item
+    if (new_it != NULL)
         do_item_remove(new_it);
 
     if (stored == STORED) {
         c->cas = ITEM_get_cas(it);
     }
 
-   // if(itt)
-    // slabs_get_curr(itt);
     return stored;
 }
 
@@ -2549,7 +2534,6 @@ typedef struct token_s {
  *      command  = tokens[ix].value;
  *   }
  */
-
 //将一条命令分割成一个个的token，并用tokens数组一一对应的指向
 //比如命令"set tt 3 0 10"，将被分割成"set"、"tt"、"3"、"0"、"10"
 //并用tokens数组的5个元素对应指向。token_t类型的value成员指向对应token
@@ -2740,17 +2724,26 @@ static void server_stats(ADD_STAT add_stats, conn *c) {
     APPEND_STAT("limit_maxbytes", "%llu", (unsigned long long)settings.maxbytes);
     APPEND_STAT("accepting_conns", "%u", stats.accepting_conns);
     APPEND_STAT("listen_disabled_num", "%llu", (unsigned long long)stats.listen_disabled_num);
+    APPEND_STAT("time_in_listen_disabled_us", "%llu", stats.time_in_listen_disabled_us);
     APPEND_STAT("threads", "%d", settings.num_threads);
     APPEND_STAT("conn_yields", "%llu", (unsigned long long)thread_stats.conn_yields);
     APPEND_STAT("hash_power_level", "%u", stats.hash_power_level);
     APPEND_STAT("hash_bytes", "%llu", (unsigned long long)stats.hash_bytes);
     APPEND_STAT("hash_is_expanding", "%u", stats.hash_is_expanding);
     if (settings.slab_reassign) {
+        APPEND_STAT("slab_reassign_rescues", "%llu", stats.slab_reassign_rescues);
+        APPEND_STAT("slab_reassign_evictions_nomem", "%llu", stats.slab_reassign_evictions_nomem);
+        APPEND_STAT("slab_reassign_inline_reclaim", "%llu", stats.slab_reassign_inline_reclaim);
+        APPEND_STAT("slab_reassign_busy_items", "%llu", stats.slab_reassign_busy_items);
         APPEND_STAT("slab_reassign_running", "%u", stats.slab_reassign_running);
         APPEND_STAT("slabs_moved", "%llu", stats.slabs_moved);
     }
     if (settings.lru_crawler) {
         APPEND_STAT("lru_crawler_running", "%u", stats.lru_crawler_running);
+        APPEND_STAT("lru_crawler_starts", "%u", stats.lru_crawler_starts);
+    }
+    if (settings.lru_maintainer_thread) {
+        APPEND_STAT("lru_maintainer_juggles", "%llu", (unsigned long long)stats.lru_maintainer_juggles);
     }
     APPEND_STAT("malloc_fails", "%llu",
                 (unsigned long long)stats.malloc_fails);
@@ -2829,6 +2822,10 @@ static void process_stat_settings(ADD_STAT add_stats, void *c) {
     APPEND_STAT("tail_repair_time", "%d", settings.tail_repair_time);
     APPEND_STAT("flush_enabled", "%s", settings.flush_enabled ? "yes" : "no");
     APPEND_STAT("hash_algorithm", "%s", settings.hash_algorithm);
+    APPEND_STAT("lru_maintainer_thread", "%s", settings.lru_maintainer_thread ? "yes" : "no");
+    APPEND_STAT("hot_lru_pct", "%d", settings.hot_lru_pct);
+    APPEND_STAT("warm_lru_pct", "%d", settings.warm_lru_pct);
+    APPEND_STAT("expirezero_does_not_evict", "%s", settings.expirezero_does_not_evict ? "yes" : "no");
 }
 
 //获取conn对应的IP地址信息 或者 域名信息等
@@ -2979,7 +2976,7 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
         out_string(c, "RESET");
         return ;
     } else if (strcmp(subcommand, "detail") == 0) { //stats detail on | off | dump
-        /*
+   /*
         stats detail on | off | dump
         参数为on，打开详细操作记录
         参数为off，关闭详细操作记录
@@ -2997,7 +2994,8 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
     } else if (strcmp(subcommand, "cachedump") == 0) {
         char *buf;
         unsigned int bytes, id, limit = 0;
-        /*
+
+/*
         stats cachedump slab_id limit_num 显示某个slab中的前limit_num个key列表，显示格式如下
         ITEM key_name [ value_length b; expire_time|access_time s] 其中，显示 过期时间(timestamp) 
         如果是永不过期的key，expire_time会显示为服务器启动的时间 
@@ -3013,7 +3011,7 @@ static void process_stat(conn *c, token_t *tokens, const size_t ntokens) {
             return;
         }
 
-        if (id >= POWER_LARGEST) {
+        if (id >= MAX_NUMBER_OF_SLAB_CLASSES-1) {
             out_string(c, "CLIENT_ERROR Illegal slab id");
             return;
         }
@@ -3060,34 +3058,33 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
     char *suffix;
     assert(c != NULL);
 
-     //key_token->value != NULL  
-    //遇到command结束标识符'\0'时跳出循环  
     do {
 		//因为一个get命令可以同时获取多条记录的内容
 		//比如get key1 key2 key3
-        while(key_token->length != 0) {//针对多个key的情况，一个key处理结束时跳出循环  
+        while(key_token->length != 0) {
 
             key = key_token->value;
             nkey = key_token->length;
 
-            if(nkey > KEY_MAX_LENGTH) { //key最大长度250  
+            if(nkey > KEY_MAX_LENGTH) {
                 out_string(c, "CLIENT_ERROR bad command line format");
                 while (i-- > 0) {
                     item_remove(*(c->ilist + i));
                 }
                 return;
             }
+
             it = item_get(key, nkey);
             if (settings.detail_enabled) {
                 stats_prefix_record_get(key, nkey, NULL != it);
             }
             if (it) {
-                if (i >= c->isize) {//isize：ilist大小，超出ilist大小时重新分配  
+                if (i >= c->isize) {
                     item **new_list = realloc(c->ilist, sizeof(item *) * c->isize * 2);
                     if (new_list) {
                         c->isize *= 2;
                         c->ilist = new_list;
-                    } else {//分配失败，移除it，放入回收槽slot中。  
+                    } else {
                         STATS_LOCK();
                         stats.malloc_fails++;
                         STATS_UNLOCK();
@@ -3103,9 +3100,9 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                  *   key
                  *   " " + flags + " " + data length + "\r\n" + data (with \r\n)
                  */
-                //使用gets命令  
+
                 if (return_cas)
-                {//不是cas  
+                {
                   MEMCACHED_COMMAND_GET(c->sfd, ITEM_key(it), it->nkey,
                                         it->nbytes, ITEM_get_cas(it));
                   /* Goofy mid-flight realloc. */
@@ -3137,14 +3134,13 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
                       return;
                   }
                   *(c->suffixlist + i) = suffix;
-                  //suffix：代表cas的版本号，包括\r\n 
                   int suffix_len = snprintf(suffix, SUFFIX_SIZE,
                                             " %llu\r\n",
                                             (unsigned long long)ITEM_get_cas(it));
-				  //填充要返回的信息 //ITEM_suffix(it),指向flag，nsuffix包括flag+data length + \r\n  
+				  //填充要返回的信息
                   if (add_iov(c, "VALUE ", 6) != 0 || //如果add_iov成功，则返回0
                       add_iov(c, ITEM_key(it), it->nkey) != 0 ||
-                      add_iov(c, ITEM_suffix(it), it->nsuffix - 2) != 0 ||  //减去\r\n，则不换行，版本号紧跟着flags+length  
+                      add_iov(c, ITEM_suffix(it), it->nsuffix - 2) != 0 ||
                       add_iov(c, suffix, suffix_len) != 0 ||
                       add_iov(c, ITEM_data(it), it->nbytes) != 0)
                       {
@@ -3178,12 +3174,11 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
 
                 /* item_get() has incremented it->refcount for us */
                 pthread_mutex_lock(&c->thread->stats.mutex);
-                c->thread->stats.slab_stats[it->slabs_clsid].get_hits++;
+                c->thread->stats.slab_stats[ITEM_clsid(it)].get_hits++;
                 c->thread->stats.get_cmds++;
                 pthread_mutex_unlock(&c->thread->stats.mutex);
 				//刷新这个item的访问时间以及在LRU队列中的位置
                 item_update(it);
-
 				//并不会马上放弃对这个item的占用。因为在add_iov函数中，memcached
 				//并不会复制一份item，而是直接使用item结构体本身的结构。故不能马上解除对
 				//item的引用，不然其他worker线程就有机会把这个item释放，导致野指针
@@ -3210,7 +3205,7 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
         //不在第一次tokensize的tokens数组中，此时需要多次调用tokensize_command
         //函数，把所有的键值都tokenize出来。注意，此时还是在get命令中。
         //当然在看这里的代码时直接忽略这种情况，我们只考虑"get tk"命令
-        if(key_token->value != NULL) { //get多个key时，解析剩余的key  
+        if(key_token->value != NULL) {
             ntokens = tokenize_command(key_token->value, tokens, MAX_TOKENS);
             key_token = tokens;
         }
@@ -3242,12 +3237,11 @@ static inline void process_get_command(conn *c, token_t *tokens, size_t ntokens,
     }
 }
 
-//process_update_command读取第一行，complete_nread_ascii读取完数据后处理
 static void process_update_command(conn *c, token_t *tokens, const size_t ntokens, int comm, bool handle_cas) {
     char *key; //键值
     size_t nkey; //键值长度
     unsigned int flags; //item的flags
-    int32_t exptime_int = 0; 
+    int32_t exptime_int = 0;
     time_t exptime;//item的超时
     int vlen;
     uint64_t req_cas_id=0;
@@ -3257,18 +3251,13 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
 
 	//服务器不需要回复信息给客户端，这可以减少网络IO进而提高速度
 	//这种设置是一次性的，不影响下一条命令
-    set_noreply_maybe(c, tokens, ntokens); //处理用户命令里面的noreply
+    set_noreply_maybe(c, tokens, ntokens);
 
 	//键值的长度太长了。KEY_MAX_LENGTH为250
     if (tokens[KEY_TOKEN].length > KEY_MAX_LENGTH) {
         out_string(c, "CLIENT_ERROR bad command line format");
         return;
     }
-
-    int i;
-    printf("yang test : <ntokens:%d>\n", (int)ntokens);
-    for(i = 0; i < ntokens; i++) 
-        printf("yang test : <value:%s>\n", tokens[i].value);
 
     key = tokens[KEY_TOKEN].value;
     nkey = tokens[KEY_TOKEN].length;
@@ -3292,8 +3281,7 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         exptime = REALTIME_MAXDELTA + 1; //REALTIME_MAXDELTA等于30天
 
     // does cas value exist?
-    if (handle_cas) { //只有cas命令这里才会满足条件
-
+    if (handle_cas) {
         /*
         set yang 1 1 3 2
         abc
@@ -3312,16 +3300,16 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
         return;
     }
 
+    if (settings.detail_enabled) {
+        stats_prefix_record_set(key, nkey);
+    }
+
 	//根据所需的大小分配对应的item，并给这个item赋值
 	// 除了time和refcount成员外，其他的都赋值了。并把键值、flag这些值都拷贝
 	//到item后面的buff里面了，至于data，因为现在都还没拿到所以还没赋值
 	//realtime(exptime)是直接赋值给 item的exptime成员
     it = item_alloc(key, nkey, flags, realtime(exptime), vlen);
 
-    if (settings.detail_enabled) {
-        stats_prefix_record_set(key, nkey);
-    }
-    
     if (it == 0) {//没内存了，获取item失败
         if (! item_size_ok(nkey, flags, vlen))
             out_string(c, "SERVER_ERROR object too large for cache");
@@ -3343,16 +3331,14 @@ static void process_update_command(conn *c, token_t *tokens, const size_t ntoken
 
         return;
     }
-
-    //set cas等命令行中的expire保存到it->expire  cas保存在it->data->case中的
     ITEM_set_cas(it, req_cas_id); //填充cas部分
 
 	//本函数并不会把item插入到哈希表和LRU队列，这个插入工作由
 	//complete_nread_ascii函数完成  当从客户端读取玩数据部分后再complete_nread中把item添加到hash和LRU队列中
     c->item = it;
-    c->ritem = ITEM_data(it);//数据直通车 
+    c->ritem = ITEM_data(it);//数据直通车
     c->rlbytes = it->nbytes; //等于vlen(要比用户输入的长度大2，因为要加上\r\n)
-    c->cmd = comm;  
+    c->cmd = comm;
     conn_set_state(c, conn_nread); //继续去read数据部分+\r\n
 }
 
@@ -3384,7 +3370,7 @@ static void process_touch_command(conn *c, token_t *tokens, const size_t ntokens
         item_update(it);
         pthread_mutex_lock(&c->thread->stats.mutex);
         c->thread->stats.touch_cmds++;
-        c->thread->stats.slab_stats[it->slabs_clsid].touch_hits++;
+        c->thread->stats.slab_stats[ITEM_clsid(it)].touch_hits++;
         pthread_mutex_unlock(&c->thread->stats.mutex);
 
         out_string(c, "TOUCHED");
@@ -3473,6 +3459,11 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
         return DELTA_ITEM_NOT_FOUND;
     }
 
+    /* Can't delta zero byte values. 2-byte are the "\r\n" */
+    if (it->nbytes <= 2) {
+        return NON_NUMERIC;
+    }
+
     if (cas != NULL && *cas != 0 && ITEM_get_cas(it) != *cas) {
         do_item_remove(it);
         return DELTA_ITEM_CAS_MISMATCH;
@@ -3485,10 +3476,10 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
         return NON_NUMERIC;
     }
 
-    if (incr) {//inc命令，加
+    if (incr) {
         value += delta;
         MEMCACHED_COMMAND_INCR(c->sfd, ITEM_key(it), it->nkey, value);
-    } else { //dec命令-
+    } else {
         if(delta > value) {
             value = 0;
         } else {
@@ -3499,9 +3490,9 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
 
     pthread_mutex_lock(&c->thread->stats.mutex);
     if (incr) {
-        c->thread->stats.slab_stats[it->slabs_clsid].incr_hits++;
+        c->thread->stats.slab_stats[ITEM_clsid(it)].incr_hits++;
     } else {
-        c->thread->stats.slab_stats[it->slabs_clsid].decr_hits++;
+        c->thread->stats.slab_stats[ITEM_clsid(it)].decr_hits++;
     }
     pthread_mutex_unlock(&c->thread->stats.mutex);
 
@@ -3513,9 +3504,7 @@ enum delta_result_type do_add_delta(conn *c, const char *key, const size_t nkey,
     if (res + 2 <= it->nbytes && it->refcount == 2) { /* replace in-place */
         /* When changing the value without replacing the item, we
            need to update the CAS on the existing item. */
-        mutex_lock(&cache_lock); /* FIXME */
         ITEM_set_cas(it, (settings.use_cas) ? get_cas_id() : 0);
-        mutex_unlock(&cache_lock);
 
         memcpy(ITEM_data(it), buf, res);
         memset(ITEM_data(it) + res, ' ', it->nbytes - res - 2);
@@ -3589,7 +3578,7 @@ static void process_delete_command(conn *c, token_t *tokens, const size_t ntoken
         MEMCACHED_COMMAND_DELETE(c->sfd, ITEM_key(it), it->nkey);
 
         pthread_mutex_lock(&c->thread->stats.mutex);
-        c->thread->stats.slab_stats[it->slabs_clsid].delete_hits++;
+        c->thread->stats.slab_stats[ITEM_clsid(it)].delete_hits++;
         pthread_mutex_unlock(&c->thread->stats.mutex);
 
         item_unlink(it);
@@ -3676,12 +3665,11 @@ static void process_command(conn *c, char *command) {
 	//在command字符串中的位置，length则指明该token的长度
 	//该函数返回token的数量，length则指明该token的长度
 	//上面的set命令例子，tokensize_command会返回6。最后一个token是无意义的
-    ntokens = tokenize_command(command, tokens, MAX_TOKENS);//将命令记号化
-
+    ntokens = tokenize_command(command, tokens, MAX_TOKENS);
 	//对于命令"get tk"，那么token[0].value等于指向"get"的开始位置
 	//tokens[1].value则指向"tk"的开始位置
-	if (ntokens >= 3 &&
-        ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) || //get gets都可以一次获取多个KEY-VALUE
+    if (ntokens >= 3 &&
+        ((strcmp(tokens[COMMAND_TOKEN].value, "get") == 0) ||
          (strcmp(tokens[COMMAND_TOKEN].value, "bget") == 0))) {
 
         process_get_command(c, tokens, ntokens, false);
@@ -3696,18 +3684,14 @@ static void process_command(conn *c, char *command) {
         process_update_command(c, tokens, ntokens, comm, false);
 
     } else if ((ntokens == 7 || ntokens == 8) && (strcmp(tokens[COMMAND_TOKEN].value, "cas") == 0 && (comm = NREAD_CAS))) {
-        //cas可以参考http://www.linuxidc.com/Linux/2015-01/112507p12.htm
-        /*
-        "add" means "store this data, but only if the server *doesn't* already；
-        “cas” is a check and set operation which means “store this data but only if no one else has updated since I last fetched it.” ；
-        */
+
         process_update_command(c, tokens, ntokens, comm, true);
 
     } else if ((ntokens == 4 || ntokens == 5) && (strcmp(tokens[COMMAND_TOKEN].value, "incr") == 0)) {
 
         process_arithmetic_command(c, tokens, ntokens, 1);
 
-    } else if (ntokens >= 3 && (strcmp(tokens[COMMAND_TOKEN].value, "gets") == 0)) { //get gets都可以一次获取多个KEY-VALUE
+    } else if (ntokens >= 3 && (strcmp(tokens[COMMAND_TOKEN].value, "gets") == 0)) {
 
         process_get_command(c, tokens, ntokens, true);
 
@@ -3729,6 +3713,7 @@ static void process_command(conn *c, char *command) {
 
     } else if (ntokens >= 2 && ntokens <= 4 && (strcmp(tokens[COMMAND_TOKEN].value, "flush_all") == 0)) {
         time_t exptime = 0;
+        rel_time_t new_oldest = 0;
 
         set_noreply_maybe(c, tokens, ntokens);
 
@@ -3742,17 +3727,12 @@ static void process_command(conn *c, char *command) {
             return;
         }
 
-        if(ntokens == (c->noreply ? 3 : 2)) {
-            settings.oldest_live = current_time - 1;
-            item_flush_expired();
-            out_string(c, "OK");
-            return;
-        }
-
-        exptime = strtol(tokens[1].value, NULL, 10);
-        if(errno == ERANGE) {
-            out_string(c, "CLIENT_ERROR bad command line format");
-            return;
+        if (ntokens != (c->noreply ? 3 : 2)) {
+            exptime = strtol(tokens[1].value, NULL, 10);
+            if(errno == ERANGE) {
+                out_string(c, "CLIENT_ERROR bad command line format");
+                return;
+            }
         }
 
         /*
@@ -3761,11 +3741,19 @@ static void process_command(conn *c, char *command) {
           value.  So we process exptime == 0 the same way we do when
           no delay is given at all.
         */
-        if (exptime > 0)
-            settings.oldest_live = realtime(exptime) - 1;
-        else /* exptime == 0 */
-            settings.oldest_live = current_time - 1;
-        item_flush_expired();
+        if (exptime > 0) {
+            new_oldest = realtime(exptime);
+        } else { /* exptime == 0 */
+            new_oldest = current_time;
+        }
+
+        if (settings.use_cas) {
+            settings.oldest_live = new_oldest - 1;
+            if (settings.oldest_live <= current_time)
+                settings.oldest_cas = get_cas_id();
+        } else {
+            settings.oldest_live = new_oldest;
+        }
         out_string(c, "OK");
         return;
 
@@ -3867,6 +3855,9 @@ static void process_command(conn *c, char *command) {
             case CRAWLER_BADCLASS:
                 out_string(c, "BADCLASS invalid class id");
                 break;
+            case CRAWLER_NOTSTARTED:
+                out_string(c, "NOTSTARTED no items to crawl");
+                break;
             }
             return;
         } else if (ntokens == 4 && strcmp(tokens[COMMAND_TOKEN + 1].value, "tocrawl") == 0) {
@@ -3921,14 +3912,12 @@ static void process_command(conn *c, char *command) {
 }
 
 /*
+ * if we have a complete line in the buffer, process it.
+ *//*
 <command name> <key> <flags> <exptime> <bytes> [noreply]\r\n
 cas <key> <flags> <exptime> <bytes> <cas unique> [noreply]\r\n
 注意上面的命令部分后面有\r\n，然后才是数据部分\r\n，所以process_command实际上会执行两次
-*/
-
-/*
- * if we have a complete line in the buffer, process it.
- */ //解析客户端的数据，解析出命令行进行处理
+*/ //解析客户端的数据，解析出命令行进行处理
 static int try_read_command(conn *c) {
     assert(c != NULL);
     assert(c->rcurr <= (c->rbuf + c->rsize));
@@ -4032,7 +4021,7 @@ static int try_read_command(conn *c) {
 			//c->rbytes是接收到的数据包的长度  
             //这边非常有趣，如果一次接收的数据报文大于了1K，则Memcached回去判断这个请求是否太大了，是否有问题？  
             //然后会关闭这个客户端的链接  
-            if (c->rbytes > 1024) {
+		   if (c->rbytes > 1024) {
                 /*
                  * We didn't have a '\n' in the first k. This _has_ to be a
                  * large multiget, if not we should just nuke the connection.
@@ -4052,18 +4041,14 @@ static int try_read_command(conn *c) {
 			//返回0表示需要继续读取socket的数据才能解析命令
             return 0;
         }
-
 		//来到这里，说明已经读取到至少一条完整的命令
-
 		//用cont指向下一行的开始，无论行尾是\n还是\r\n
-		cont = el + 1;
-
+        cont = el + 1;
 		//不同的平台对于行尾有不同的处理，有的为\r\n有的则是\n。
 		//所以memcached还要判断一下\n前面的一个字符是否为\r
         if ((el - c->rcurr) > 1 && *(el - 1) == '\r') {
             el--; //指向行尾的开始字符
         }
-
 		//'\0',C语言字符串结尾符号。结合c->rcurr这个开始位置，就可以确定
 		//这个命令(现在被看做一个字符串)的开始和结束位置。rcurr指向了一个字符串
 		//注意，下一条命令的开始位置由前面的cont指明了
@@ -4235,12 +4220,20 @@ void do_accept_new_conns(const bool do_accept) {
     }
 
     if (do_accept) {
+        struct timeval maxconns_exited;
+        uint64_t elapsed_us;
+        gettimeofday(&maxconns_exited,NULL);
         STATS_LOCK();
+        elapsed_us =
+            (maxconns_exited.tv_sec - stats.maxconns_entered.tv_sec) * 1000000
+            + (maxconns_exited.tv_usec - stats.maxconns_entered.tv_usec);
+        stats.time_in_listen_disabled_us += elapsed_us;
         stats.accepting_conns = true;
         STATS_UNLOCK();
     } else {
         STATS_LOCK();
         stats.accepting_conns = false;
+        gettimeofday(&stats.maxconns_entered,NULL);
         stats.listen_disabled_num++;
         STATS_UNLOCK();
         allow_new_conns = false;
@@ -4437,7 +4430,6 @@ static void drive_machine(conn *c) {
 			//如果读取到了一条完整的命令，那么函数内部会去解析
 			//并进行调用process_command函数进行一些处理
 			//像set、add、replace、get这些命令，会在处理的时候调用
-			
             if (try_read_command(c) == 0) {
                 /* wee need more data! */
                 conn_set_state(c, conn_waiting);
@@ -4504,7 +4496,6 @@ static void drive_machine(conn *c) {
                 }
                 c->ritem += tocopy; //item存储过程中数据部分填充末尾处
                 c->rlbytes -= tocopy; //数据部分还差多少才填满
-
                 //已经解析的数据部分填充后进行移位
                 c->rcurr += tocopy;
                 c->rbytes -= tocopy;
@@ -4937,16 +4928,40 @@ static int server_sockets(int port, enum network_transport transport,
              p = strtok_r(NULL, ";,", &b)) {
             int the_port = port;
 			//启动时可能使用-l ip:port参数形式
+            char *h = NULL;
+            if (*p == '[') {
+                // expecting it to be an IPv6 address enclosed in []
+                // i.e. RFC3986 style recommended by RFC5952
+                char *e = strchr(p, ']');
+                if (e == NULL) {
+                    fprintf(stderr, "Invalid IPV6 address: \"%s\"", p);
+                    return 1;
+                }
+                h = ++p; // skip the opening '['
+                *e = '\0';
+                p = ++e; // skip the closing ']'
+            }
+
             char *s = strchr(p, ':');
 			//此时采用ip后面的端口号，而不是采用-p指定的端口号
             if (s != NULL) {
-                *s = '\0';
-                ++s;
-                if (!safe_strtol(s, &the_port)) {
-                    fprintf(stderr, "Invalid port number: \"%s\"", s);
-                    return 1;
+                // If no more semicolons - attempt to treat as port number.
+                // Otherwise the only valid option is an unenclosed IPv6 without port, until
+                // of course there was an RFC3986 IPv6 address previously specified -
+                // in such a case there is no good option, will just send it to fail as port number.
+                if (strchr(s + 1, ':') == NULL || h != NULL) {
+                    *s = '\0';
+                    ++s;
+                    if (!safe_strtol(s, &the_port)) {
+                        fprintf(stderr, "Invalid port number: \"%s\"", s);
+                        return 1;
+                    }
                 }
             }
+
+            if (h != NULL)
+                p = h;
+
             if (strcmp(p, "*") == 0) {
                 p = NULL;
             }
@@ -5127,6 +5142,7 @@ static void usage(void) {
            "-vvv          extremely verbose (also print internal state transitions)\n"
            "-h            print this help and exit\n"
            "-i            print memcached and libevent license\n"
+           "-V            print version and exit\n"
            "-P <file>     save PID in <file>, only used with -d option\n"
            "-f <factor>   chunk size growth factor (default: 1.25)\n"
            "-n <bytes>    minimum space allocated for key+value+flags (default: 48)\n");
@@ -5145,7 +5161,7 @@ static void usage(void) {
            "              requests process for a given connection to prevent \n"
            "              starvation (default: 20)\n");
     printf("-C            Disable use of CAS\n");
-    printf("-b            Set the backlog queue limit (default: 1024)\n");
+    printf("-b <num>      Set the backlog queue limit (default: 1024)\n");
     printf("-B            Binding protocol - one of ascii, binary, or auto (default)\n");
     printf("-I            Override the size of each slab page. Adjusts max item size\n"
            "              (default: 1mb, min: 1k, max: 128m)\n");
@@ -5162,7 +5178,7 @@ static void usage(void) {
            "                restart.\n"
            "              - tail_repair_time: Time in seconds that indicates how long to wait before\n"
            "                forcefully taking over the LRU tail item whose refcount has leaked.\n"
-           "                The default is 3 hours.\n"
+           "                Disabled by default; dangerous option.\n"
            "              - hash_algorithm: The hash table algorithm\n"
            "                default is jenkins hash. options: jenkins, murmur3\n"
            "              - lru_crawler: Enable LRU Crawler background thread\n"
@@ -5170,6 +5186,13 @@ static void usage(void) {
            "                default is 100.\n"
            "              - lru_crawler_tocrawl: Max items to crawl per slab per run\n"
            "                default is 0 (unlimited)\n"
+           "              - lru_maintainer: Enable new LRU system + background thread\n"
+           "              - hot_lru_pct: Pct of slab memory to reserve for hot lru.\n"
+           "                (requires lru_maintainer)\n"
+           "              - warm_lru_pct: Pct of slab memory to reserve for warm lru.\n"
+           "                (requires lru_maintainer)\n"
+           "              - expirezero_does_not_evict: Items set to not expire, will not evict.\n"
+           "                (requires lru_maintainer)\n"
            );
     return;
 }
@@ -5295,7 +5318,7 @@ static void remove_pidfile(const char *pid_file) {
 }
 
 static void sig_handler(const int sig) {
-    printf("SIGINT handled.\n");
+    printf("Signal handled: %s.\n", strsignal(sig));
     exit(EXIT_SUCCESS);
 }
 
@@ -5364,7 +5387,7 @@ static bool sanitycheck(void) {
     if (ever != NULL) {
         if (strncmp(ever, "1.", 2) == 0) {
             /* Require at least 1.3 (that's still a couple of years old) */
-            if ((ever[2] == '1' || ever[2] == '2') && !isdigit(ever[3])) {
+            if (('0' <= ever[2] && ever[2] < '3') && !isdigit(ever[3])) {
                 fprintf(stderr, "You are using libevent %s.\nPlease upgrade to"
                         " a more recent version (1.3 or newer)\n",
                         event_get_version());
@@ -5376,7 +5399,7 @@ static bool sanitycheck(void) {
     return true;
 }
 
-int main (int argc, char **argv) {
+int main (int argc, char **argv) { 
     int c;
     bool lock_memory = false;
     bool do_daemonize = false;
@@ -5398,10 +5421,12 @@ int main (int argc, char **argv) {
     bool protocol_specified = false;
     bool tcp_specified = false;
     bool udp_specified = false;
+    bool start_lru_maintainer = false;
+    bool start_lru_crawler = false;
     enum hashfunc_type hash_type = JENKINS_HASH;
     uint32_t tocrawl;
 
-    char *subopts;
+    char *subopts, *subopts_orig;
     char *subopts_value;
     enum {
         MAXCONNS_FAST = 0,
@@ -5412,7 +5437,11 @@ int main (int argc, char **argv) {
         HASH_ALGORITHM,
         LRU_CRAWLER,
         LRU_CRAWLER_SLEEP,
-        LRU_CRAWLER_TOCRAWL
+        LRU_CRAWLER_TOCRAWL,
+        LRU_MAINTAINER,
+        HOT_LRU_PCT,
+        WARM_LRU_PCT,
+        NOEXP_NOEVICT
     };
     char *const subopts_tokens[] = {
         [MAXCONNS_FAST] = "maxconns_fast",
@@ -5424,6 +5453,10 @@ int main (int argc, char **argv) {
         [LRU_CRAWLER] = "lru_crawler",
         [LRU_CRAWLER_SLEEP] = "lru_crawler_sleep",
         [LRU_CRAWLER_TOCRAWL] = "lru_crawler_tocrawl",
+        [LRU_MAINTAINER] = "lru_maintainer",
+        [HOT_LRU_PCT] = "hot_lru_pct",
+        [WARM_LRU_PCT] = "warm_lru_pct",
+        [NOEXP_NOEVICT] = "expirezero_does_not_evict",
         NULL
     };
 	//检查libevent的版本是否足够新 1.3即可
@@ -5431,20 +5464,24 @@ int main (int argc, char **argv) {
         return EX_OSERR;
     }
 
-	
-    /* handle SIGINT */
+    /* handle SIGINT and SIGTERM */
     signal(SIGINT, sig_handler);
+    signal(SIGTERM, sig_handler);
 
 	//对memcached设置取默认值
     /* init settings */
     settings_init();
+
+    /* Run regardless of initializing it later */
+    init_lru_crawler();
+    init_lru_maintainer();
 
     /* set stderr non-buffering (for running under, say, daemontools) */
     setbuf(stderr, NULL);
     //解析memcached启动参数
     /* process arguments */
     while (-1 != (c = getopt(argc, argv,
-          "a:"  /* access mask for unix socket */      
+          "a:"  /* access mask for unix socket */
           "A"  /* enable admin shutdown commannd */
           "p:"  /* TCP port number to listen on */
           "s:"  /* unix socket path to listen on */
@@ -5453,10 +5490,9 @@ int main (int argc, char **argv) {
           "M"   /* return error on memory exhausted */
           "c:"  /* max simultaneous connections */
           "k"   /* lock down all paged memory */
-          "hi"  /* help, licence info */
+          "hiV" /* help, licence info, version */
           "r"   /* maximize core file limit */
           "v"   /* verbose */
-      
           "d"   /* daemon mode */
           "l:"  /* interface to listen on */
           "u:"  /* user identity to run as */
@@ -5488,7 +5524,7 @@ int main (int argc, char **argv) {
             settings.access= strtol(optarg,NULL,8);
             break;
 		//监听的UDP端口号 -p为TCP的监听端口  -U为UDP的监听端口
-        case 'U': 
+        case 'U':
             settings.udpport = atoi(optarg);
             udp_specified = true;
             break;
@@ -5523,6 +5559,8 @@ int main (int argc, char **argv) {
             usage_license();
             exit(EXIT_SUCCESS);
 		//将memcached使用到的内存锁定在内存中，不准OS把memcached的内存移动到虚拟内存。因为当OS把memcached的内存移动到虚拟内存可能导致页错误，降低memcached的响应时间
+            printf(PACKAGE " " VERSION "\n");
+            exit(EXIT_SUCCESS);
         case 'k':
             lock_memory = true;
             break;
@@ -5533,8 +5571,11 @@ int main (int argc, char **argv) {
 		//memcached绑定的ip地址。如果不设置这个选项，那么memcached将使用INADDR_ANY。如果想指定多个IP地址，
 		//那么该选项的参数可以由多个ip组成，ip之间用逗号分隔。也可以多次使用这个选项，此时端口应该随ip而不是单独用-p选项指定。
 		//例如-l 127.0.0.1:8888, 192.168.1.112:9999
-        case 'l': 
+        case 'l':
             if (settings.inter != NULL) {
+                if (strstr(settings.inter, optarg) != NULL) {
+                    break;
+                }
                 size_t len = strlen(settings.inter) + strlen(optarg) + 2;
                 char *p = malloc(len);
                 if (p == NULL) {
@@ -5572,7 +5613,6 @@ int main (int argc, char **argv) {
             pid_file = optarg;
             break;
 		//item的扩容因子。默认值为1.25。该选项的参数值可以是小数但必须大于1.0	
-		//
         case 'f': //memcached默认情况下下一个slab的最大值为前一个的1.25倍，这个可以通过修改-f参数来修改增长比例
             settings.factor = atof(optarg);
             if (settings.factor <= 1.0) {
@@ -5667,6 +5707,7 @@ int main (int argc, char **argv) {
             } else {
                 settings.item_size_max = atoi(buf);
             }
+            free(buf);
             if (settings.item_size_max < 1024) {
                 fprintf(stderr, "Item max size cannot be less than 1024 bytes.\n");
                 return 1;
@@ -5682,7 +5723,6 @@ int main (int argc, char **argv) {
                     " and will decrease your memory efficiency.\n"
                 );
             }
-            free(buf);
             break;
 		//打开sasl 安全协议。	
         case 'S': /* set Sasl authentication to true. Default is false */
@@ -5698,9 +5738,10 @@ int main (int argc, char **argv) {
             break;
 		//有下面几个子选项可以设置。这个选项是用来优化的	
         case 'o': /* It's sub-opts time! */
-            subopts = optarg;
+            subopts_orig = subopts = strdup(optarg); /* getsubopt() changes the original args */
 
             while (*subopts != '\0') {
+
             /*
             char *const subopts_tokens[] = {
                 [MAXCONNS_FAST] = "maxconns_fast",
@@ -5786,13 +5827,14 @@ int main (int argc, char **argv) {
                 break;
 			//本选项用于启动LRU爬虫线程。	
             case LRU_CRAWLER:
-                if (start_item_crawler_thread() != 0) {
-                    fprintf(stderr, "Failed to enable LRU crawler thread\n");
+                start_lru_crawler = true;
+                break;
+            case LRU_CRAWLER_SLEEP:
+                if (subopts_value == NULL) {
+                    fprintf(stderr, "Missing lru_crawler_sleep value\n");
                     return 1;
                 }
-                break;
 			//LRU爬虫线程工作时的休眠间隔。本选项需要一个参数作为休眠时间，单位为微妙，取值范围是[0,100000]	
-            case LRU_CRAWLER_SLEEP:
                 settings.lru_crawler_sleep = atoi(subopts_value);
                 if (settings.lru_crawler_sleep > 1000000 || settings.lru_crawler_sleep < 0) {
                     fprintf(stderr, "LRU crawler sleep must be between 0 and 1 second\n");
@@ -5801,11 +5843,43 @@ int main (int argc, char **argv) {
                 break;
 			//LRU爬虫检测每条LRU队列中的多少个item	
             case LRU_CRAWLER_TOCRAWL:
+                if (subopts_value == NULL) {
+                    fprintf(stderr, "Missing lru_crawler_tocrawl value\n");
+                    return 1;
+                }
                 if (!safe_strtoul(subopts_value, &tocrawl)) {
                     fprintf(stderr, "lru_crawler_tocrawl takes a numeric 32bit value\n");
                     return 1;
                 }
                 settings.lru_crawler_tocrawl = tocrawl;
+                break;
+            case LRU_MAINTAINER:
+                start_lru_maintainer = true;
+                break;
+            case HOT_LRU_PCT:
+                if (subopts_value == NULL) {
+                    fprintf(stderr, "Missing hot_lru_pct argument\n");
+                    return 1;
+                };
+                settings.hot_lru_pct = atoi(subopts_value);
+                if (settings.hot_lru_pct < 1 || settings.hot_lru_pct >= 80) {
+                    fprintf(stderr, "hot_lru_pct must be > 1 and < 80\n");
+                    return 1;
+                }
+                break;
+            case WARM_LRU_PCT:
+                if (subopts_value == NULL) {
+                    fprintf(stderr, "Missing warm_lru_pct argument\n");
+                    return 1;
+                };
+                settings.warm_lru_pct = atoi(subopts_value);
+                if (settings.warm_lru_pct < 1 || settings.warm_lru_pct >= 80) {
+                    fprintf(stderr, "warm_lru_pct must be > 1 and < 80\n");
+                    return 1;
+                }
+                break;
+            case NOEXP_NOEVICT:
+                settings.expirezero_does_not_evict = true;
                 break;
             default:
                 printf("Illegal suboption \"%s\"\n", subopts_value);
@@ -5813,11 +5887,17 @@ int main (int argc, char **argv) {
             }
 
             }
+            free(subopts_orig);
             break;
         default:
             fprintf(stderr, "Illegal argument \"%c\"\n", c);
             return 1;
         }
+    }
+
+    if (settings.lru_maintainer_thread && settings.hot_lru_pct + settings.warm_lru_pct > 80) {
+        fprintf(stderr, "hot_lru_pct + warm_lru_pct cannot be more than 80%% combined\n");
+        exit(EX_USAGE);
     }
 
     if (hash_init(hash_type) != 0) {
@@ -5944,7 +6024,6 @@ int main (int argc, char **argv) {
 #endif
     }
 
-
     /*
     用户线程使用libevent则通常按以下步骤：
     1）用户线程通过event_init()函数创建一个event_base对象。event_base对象管理所有注册到自己内部的IO事件。
@@ -5964,7 +6043,7 @@ int main (int argc, char **argv) {
 	//main_base是一个struct event_base类型的全局变量
 	//为主线程创建一个event_base
     /* initialize main thread libevent instance */
-    main_base = event_init(); 
+    main_base = event_init();
 
     /* initialize other stuff */
     stats_init();
@@ -5981,23 +6060,29 @@ int main (int argc, char **argv) {
         perror("failed to ignore SIGPIPE; sigaction");
         exit(EX_OSERR);
     }
-
 	//创建settings.num_threads个worker线程，并且为每个worker线程创建一个CQ队列
 	//并为这些worker申请各自的event_base，worker线程然后进入事件循环
     /* start up worker threads if MT mode */
-    thread_init(settings.num_threads, main_base);
+    memcached_thread_init(settings.num_threads, main_base);
 
     if (start_assoc_maintenance_thread() == -1) {
         exit(EXIT_FAILURE);
+    }
+
+    if (start_lru_crawler && start_item_crawler_thread() != 0) {
+        fprintf(stderr, "Failed to enable LRU crawler thread\n");
+        exit(EXIT_FAILURE);
+    }
+
+    if (start_lru_maintainer && start_lru_maintainer_thread() != 0) {
+        fprintf(stderr, "Failed to enable LRU maintainer thread\n");
+        return 1;
     }
 
     if (settings.slab_reassign &&
         start_slab_maintenance_thread() == -1) {
         exit(EXIT_FAILURE);
     }
-
-    /* Run regardless of initializing it later */
-    init_lru_crawler();
 
 	//设置一个定时event，定时(频率1秒)更新current_time变量
 	//这个超时event是add到全局变量main_base里面,所以主线程负责更新current_time(这是一个很重要的全局变量)

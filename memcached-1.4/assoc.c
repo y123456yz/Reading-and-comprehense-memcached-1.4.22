@@ -26,7 +26,8 @@
 #include <pthread.h>
 
 static pthread_cond_t maintenance_cond = PTHREAD_COND_INITIALIZER;
-
+static pthread_mutex_t maintenance_lock = PTHREAD_MUTEX_INITIALIZER;
+static pthread_mutex_t hash_items_counter_lock = PTHREAD_MUTEX_INITIALIZER;
 
 typedef  unsigned long  int  ub4;   /* unsigned 4-byte quantities */
 typedef  unsigned       char ub1;   /* unsigned 1-byte quantities */
@@ -47,7 +48,7 @@ static item** primary_hashtable = 0;
 /*
  * Previous hash table. During expansion, we look here for keys that haven't
  * been moved over to the primary yet.
- */ //当进行hash扩展的时候，开辟新的hash空间，见assoc_expand  之前的旧hash放入old_hashtable
+  */ //当进行hash扩展的时候，开辟新的hash空间，见assoc_expand  之前的旧hash放入old_hashtable
 static item** old_hashtable = 0;
 
 /* Number of items in the hash table. */
@@ -171,6 +172,7 @@ static void assoc_expand(void) {
 static void assoc_start_expand(void) {
     if (started_expanding)
         return;
+
     started_expanding = true;
     pthread_cond_signal(&maintenance_cond);
 }
@@ -194,10 +196,12 @@ int assoc_insert(item *it, const uint32_t hv) {
         primary_hashtable[hv & hashmask(hashpower)] = it;
     }
 
+    pthread_mutex_lock(&hash_items_counter_lock);
     hash_items++;//哈希表的item数量加一
     if (! expanding && hash_items > (hashsize(hashpower) * 3) / 2) {
         assoc_start_expand();
     }
+    pthread_mutex_unlock(&hash_items_counter_lock);
 
     MEMCACHED_ASSOC_INSERT(ITEM_key(it), it->nkey, hash_items);
     return 1;
@@ -209,17 +213,17 @@ void assoc_delete(const char *key, const size_t nkey, const uint32_t hv) {
 
     if (*before) {//查找成功
         item *nxt;
+        pthread_mutex_lock(&hash_items_counter_lock);
         hash_items--;
+        pthread_mutex_unlock(&hash_items_counter_lock);
         /* The DTrace probe cannot be triggered as the last instruction
          * due to possible tail-optimization by the compiler
          */
         MEMCACHED_ASSOC_DELETE(key, nkey, hash_items);
-
 		//因为before是一个二级指针，其值为所查找item的前驱item的h_next成员地址
 		//所以*before指向的是所查找的item。因为before是一个二级指针，所以*before
 		//作为左值时，可以给h_next成员变量赋值。所以下面三行代码是
 		//使得删除中间的item后，前后的item还能连接起来。
-		
         nxt = (*before)->h_next;
         (*before)->h_next = 0;   /* probably pointless, but whatever. */
         *before = nxt;
@@ -244,89 +248,68 @@ static void *assoc_maintenance_thread(void *arg) {
     while (do_run_maintenance_thread) {
         int ii = 0;
 
-        /* Lock the cache, and bulk move multiple buckets to the new
-         * hash table. */
+        /* There is only one expansion thread, so no need to global lock. */
          //上锁
-        item_lock_global();//锁上全局级别的锁，全部的item都在全局锁的控制之下  
-        //锁住哈希表里面的item。不然别的线程对哈希表进行增删操作时，会出现  
-        //数据不一致的情况.在item.c的do_item_link和do_item_unlink可以看到  
-        //其内部也会锁住cache_lock锁.  
-        mutex_lock(&cache_lock);
 		//进行item迁移
         for (ii = 0; ii < hash_bulk_move && expanding; ++ii) {
             item *it, *next;
             int bucket;
+            void *item_lock = NULL;
 
-            for (it = old_hashtable[expand_bucket]; NULL != it; it = next) {
-                next = it->h_next;
+            /* bucket = hv & hashmask(hashpower) =>the bucket of hash table
+             * is the lowest N bits of the hv, and the bucket of item_locks is
+             *  also the lowest M bits of hv, and N is greater than M.
+             *  So we can process expanding with only one item_lock. cool! */
+            if ((item_lock = item_trylock(expand_bucket))) {
+                    for (it = old_hashtable[expand_bucket]; NULL != it; it = next) {
+                        next = it->h_next;
+                        bucket = hash(ITEM_key(it), it->nkey) & hashmask(hashpower);
+                        it->h_next = primary_hashtable[bucket];
+                        primary_hashtable[bucket] = it;
+                    }
 
-                bucket = hash(ITEM_key(it), it->nkey) & hashmask(hashpower);
-                it->h_next = primary_hashtable[bucket];
-                primary_hashtable[bucket] = it;
+                    old_hashtable[expand_bucket] = NULL;
+
+                    expand_bucket++;
+                    if (expand_bucket == hashsize(hashpower - 1)) {
+                        expanding = false;
+                        free(old_hashtable);
+                        STATS_LOCK();
+                        stats.hash_bytes -= hashsize(hashpower - 1) * sizeof(void *);
+                        stats.hash_is_expanding = 0;
+                        STATS_UNLOCK();
+                        if (settings.verbose > 1)
+                            fprintf(stderr, "Hash table expansion done\n");
+                    }
+
+            } else {
+                usleep(10*1000);
             }
 
-            old_hashtable[expand_bucket] = NULL;
-
-            expand_bucket++;
-            if (expand_bucket == hashsize(hashpower - 1)) {
-                expanding = false;
-                free(old_hashtable);
-                STATS_LOCK();
-                stats.hash_bytes -= hashsize(hashpower - 1) * sizeof(void *);
-                stats.hash_is_expanding = 0;
-                STATS_UNLOCK();
-                if (settings.verbose > 1)
-                    fprintf(stderr, "Hash table expansion done\n");
+            if (item_lock) {
+                item_trylock_unlock(item_lock);
+                item_lock = NULL;
             }
         }
 
-		//遍历完就释放锁
-        mutex_unlock(&cache_lock);
-        item_unlock_global();
-		
 		//不需要迁移数据了
-        if (!expanding) { 
-            /*
-                迁移线程为什么要这么迂回曲折地切换workers线程的锁类型呢？直接修改所有线程的LIBEVENT_THREAD结构的item_lock_type
-             成员变量不就行了吗？
-                这主要是因为迁移线程不知道worker线程此刻在干些什么。如果worker线程正在访问item，并抢占了段级别锁。此时你把worker
-             线程的锁切换到全局锁，等worker线程解锁的时候就会解全局锁(参考前面的item_lock和item_unlock代码)，这样程序就崩溃了。
-             所以不能迁移线程去切换，只能迁移线程通知worker线程，然后worker线程自己去切换。当然是要worker线程忙完了手头上的事情
-             后，才会去修改切换的。所以迁移线程在通知完所有的worker线程后，会调用wait_for_thread_registration函数休眠等待所有的
-             worker线程都切换到指定的锁类型后才醒来。
-            */
-            /* finished expanding. tell all threads to use fine-grained locks */
-
-            //进入到这里，说明已经不需要迁移数据(停止扩展了)。  
-            //告诉所有的workers线程，访问item时，切换到段级别的锁。  
-            //会阻塞到所有workers线程都切换到段级别的锁  
-            switch_item_lock_type(ITEM_LOCK_GRANULAR);
-            slabs_rebalancer_resume();
+        if (!expanding) {
             /* We are done expanding.. just wait for next invocation */
-            mutex_lock(&cache_lock);
 			// 重置
             started_expanding = false;
-
 			//挂起迁移线程，直到worker线程插入数据后发现item数量已经到了1.5被哈希表大小，
 			//此时调用worker线程调用assoc_start_expand函数，该函数会调用pthread_cond_signal唤醒迁移线程
-            pthread_cond_wait(&maintenance_cond, &cache_lock);
-            /* Before doing anything, tell threads to use a global lock */
-            mutex_unlock(&cache_lock);
-            slabs_rebalancer_pause();
-
-            //从maintenance_cond条件变量中醒来，说明又要开始扩展哈希表和迁移数据了。  
-            //迁移线程在迁移一个桶的数据时是锁上全局级别的锁.  
-            //此时workers线程不能使用段级别的锁，而是要使用全局级别的锁，  
-            //所有的workers线程和迁移线程一起，争抢全局级别的锁.  
-            //哪个线程抢到了，才有权利访问item.  
-            //下面一行代码就是通知所有的workers线程，把你们访问item的锁切换  
-            //到全局级别的锁。switch_item_lock_type会通过条件变量休眠等待，  
-            //直到，所有的workers线程都切换到全局级别的锁，才会醒来过  
-            switch_item_lock_type(ITEM_LOCK_GLOBAL);
-            mutex_lock(&cache_lock);
-			//申请更大的哈希表，并将expanding设置为true
-            assoc_expand();
-            mutex_unlock(&cache_lock);
+            pthread_cond_wait(&maintenance_cond, &maintenance_lock);
+            /* assoc_expand() swaps out the hash table entirely, so we need
+             * all threads to not hold any references related to the hash
+             * table while this happens.
+             * This is instead of a more complex, possibly slower algorithm to
+             * allow dynamic hash table expansion without causing significant
+             * wait times.
+             */
+            pause_threads(PAUSE_ALL_THREADS);
+            assoc_expand();//申请更大的哈希表，并将expanding设置为true
+            pause_threads(RESUME_ALL_THREADS);
         }
     }
     return NULL;
@@ -346,6 +329,7 @@ int start_assoc_maintenance_thread() {
             hash_bulk_move = DEFAULT_HASH_BULK_MOVE;
         }
     }
+    pthread_mutex_init(&maintenance_lock, NULL);
     if ((ret = pthread_create(&maintenance_tid, NULL,
                               assoc_maintenance_thread, NULL)) != 0) {
         fprintf(stderr, "Can't create thread: %s\n", strerror(ret));
@@ -355,13 +339,12 @@ int start_assoc_maintenance_thread() {
 }
 
 void stop_assoc_maintenance_thread() {
-    mutex_lock(&cache_lock);
+    mutex_lock(&maintenance_lock);
     do_run_maintenance_thread = 0;
     pthread_cond_signal(&maintenance_cond);
-    mutex_unlock(&cache_lock);
+    mutex_unlock(&maintenance_lock);
 
     /* Wait for the maintenance thread to stop */
     pthread_join(maintenance_tid, NULL);
 }
-
 

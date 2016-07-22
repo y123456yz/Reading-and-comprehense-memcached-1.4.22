@@ -42,8 +42,8 @@ typedef void cache_destructor_t(void* obj, void* notused);
  * Definition of the structure to keep track of the internal details of
  * the cache allocator. Touching any of these variables results in
  * undefined behavior.
- */ 
-typedef struct { //创建空间和复制见cache_create
+ */
+typedef struct {
     /** Mutex to protect access to the structure */
     pthread_mutex_t mutex;
     /** Name of the cache objects in this cache (provided by the caller) */

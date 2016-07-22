@@ -14,25 +14,33 @@ void do_item_update(item *it);   /** update LRU time to current and reposition *
 void do_item_update_nolock(item *it);
 int  do_item_replace(item *it, item *new_it, const uint32_t hv);
 
+int item_is_flushed(item *it);
+
 /*@null@*/
-char *do_item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
-void do_item_stats(ADD_STAT add_stats, void *c);
-void do_item_stats_totals(ADD_STAT add_stats, void *c);
+char *item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
+void item_stats(ADD_STAT add_stats, void *c);
+void item_stats_totals(ADD_STAT add_stats, void *c);
 /*@null@*/
-void do_item_stats_sizes(ADD_STAT add_stats, void *c);
-void do_item_flush_expired(void);
+void item_stats_sizes(ADD_STAT add_stats, void *c);
 
 item *do_item_get(const char *key, const size_t nkey, const uint32_t hv);
 item *do_item_touch(const char *key, const size_t nkey, uint32_t exptime, const uint32_t hv);
 void item_stats_reset(void);
-extern pthread_mutex_t cache_lock;
-void item_stats_evictions(uint64_t *evicted);
+extern pthread_mutex_t lru_locks[POWER_LARGEST];
 
 enum crawler_result_type {
-    CRAWLER_OK=0, CRAWLER_RUNNING, CRAWLER_BADCLASS
+    CRAWLER_OK=0, CRAWLER_RUNNING, CRAWLER_BADCLASS, CRAWLER_NOTSTARTED
 };
+
+int start_lru_maintainer_thread(void);
+int stop_lru_maintainer_thread(void);
+int init_lru_maintainer(void);
+void lru_maintainer_pause(void);
+void lru_maintainer_resume(void);
 
 int start_item_crawler_thread(void);
 int stop_item_crawler_thread(void);
 int init_lru_crawler(void);
 enum crawler_result_type lru_crawler_crawl(char *slabs);
+void lru_crawler_pause(void);
+void lru_crawler_resume(void);

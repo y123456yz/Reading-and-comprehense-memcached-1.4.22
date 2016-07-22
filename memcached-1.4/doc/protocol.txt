@@ -188,7 +188,7 @@ After this line, the client sends the data block:
 - <data block> is a chunk of arbitrary 8-bit data of length <bytes>
   from the previous line.
 
-After sending the command line and the data blockm the client awaits
+After sending the command line and the data block the client awaits
 the reply, which may be:
 
 - "STORED\r\n", to indicate success.
@@ -323,7 +323,7 @@ without fetching it.
 
 touch <key> <exptime> [noreply]\r\n
 
-- <key> is the key of the item the client wishes the server to delete
+- <key> is the key of the item the client wishes the server to touch
 
 - <exptime> is expiration time. Works the same as with the update commands
   (set/add/etc). This replaces the existing expiration time. If an existing
@@ -347,7 +347,7 @@ Slabs Reassign
 NOTE: This command is subject to change as of this writing.
 
 The slabs reassign command is used to redistribute memory once a running
-instance has hit its limit. It might be desireable to have memory laid out
+instance has hit its limit. It might be desirable to have memory laid out
 differently than was automatically assigned after the server started.
 
 slabs reassign <source class> <dest class>\r\n
@@ -395,7 +395,9 @@ The response should always be "OK\r\n"
 
 - <0> means to set the thread on standby
 
-- <1> means to run the builtin slow algorithm to choose pages to move
+- <1> means to return pages to a global pool when there are more than 2 pages
+  worth of free chunks in a slab class. Pages are then re-assigned back into
+  other classes as-needed.
 
 - <2> is a highly aggressive mode which causes pages to be moved every time
   there is an eviction. It is not recommended to run for very long in this
@@ -425,7 +427,7 @@ The response line could be one of:
 
 lru_crawler sleep <microseconds>
 
-- The number of microseconds to sleep inbetween each item checked for
+- The number of microseconds to sleep in between each item checked for
   expiration. Smaller numbers will obviously impact the system more.
   A value of "0" disables the sleep, "1000000" (one second) is the max.
 
@@ -527,6 +529,7 @@ integers separated by a colon (treat this as a floating point number).
 | curr_connections      | 32u     | Number of open connections                |
 | total_connections     | 32u     | Total number of connections opened since  |
 |                       |         | the server started running                |
+| rejected_connections  | 64u     | Conns rejected in maxconns_fast mode      |
 | connection_structures | 32u     | Number of connection structures allocated |
 |                       |         | by the server                             |
 | reserved_fds          | 32u     | Number of misc fds used internally        |
@@ -566,6 +569,11 @@ integers separated by a colon (treat this as a floating point number).
 |                       |         | to network                                |
 | limit_maxbytes        | 32u     | Number of bytes this server is allowed to |
 |                       |         | use for storage.                          |
+| accepting_conns       | bool    | Whether or not server is accepting conns  |
+| listen_disabled_num   | 64u     | Number of times server has stopped        |
+|                       |         | accepting new connections (maxconns).     |
+| time_in_listen_disabled_us                                                  |
+|                       | 64u     | Number of microseconds in maxconns.       |
 | threads               | 32u     | Number of worker threads requested.       |
 |                       |         | (see doc/threads.txt)                     |
 | conn_yields           | 64u     | Number of times any connection yielded to |
@@ -582,8 +590,30 @@ integers separated by a colon (treat this as a floating point number).
 | slab_reassign_running | bool    | If a slab page is being moved             |
 | slabs_moved           | 64u     | Total slab pages moved                    |
 | crawler_reclaimed     | 64u     | Total items freed by LRU Crawler          |
+| crawler_items-checked | 64u     | Total items examined by LRU Crawler       |
 | lrutail_reflocked     | 64u     | Times LRU tail was found with active ref. |
-|                       |         | Items moved to head to avoid OOM errors.  |
+|                       |         | Items can be evicted to avoid OOM errors. |
+| moves_to_cold         | 64u     | Items moved from HOT/WARM to COLD LRU's   |
+| moves_to_warm         | 64u     | Items moved from COLD to WARM LRU         |
+| moves_within_lru      | 64u     | Items reshuffled within HOT or WARM LRU's |
+| direct_reclaims       | 64u     | Times worker threads had to directly      |
+|                       |         | reclaim or evict items.                   |
+| lru_crawler_starts    | 64u     | Times an LRU crawler was started          |
+| lru_maintainer_juggles                                                      |
+|                       | 64u     | Number of times the LRU bg thread woke up |
+| slab_global_page_pool | 32u     | Slab pages returned to global pool for    |
+|                       |         | reassignment to other slab classes.       |
+| slab_reassign_rescues | 64u     | Items rescued from eviction in page move  |
+| slab_reassign_evictions_nomem                                               |
+|                       | 64u     | Valid items evicted during a page move    |
+|                       |         | (due to no free memory in slab)           |
+| slab_reassign_inline_reclaim                                                |
+|                       | 64u     | Internal stat counter for when the page   |
+|                       |         | mover clears memory from the chunk        |
+|                       |         | freelist when it wasn't expecting to.     |
+| slab_reassign_busy_items                                                    |
+|                       | 64u     | Items busy during page move, requiring a  |
+|                       |         | retry before page can be moved.           |
 |-----------------------+---------+-------------------------------------------|
 
 Settings statistics
@@ -629,7 +659,14 @@ other stats command.
 | hash_algorithm    | char     | Hash table algorithm in use                  |
 | lru_crawler       | bool     | Whether the LRU crawler is enabled           |
 | lru_crawler_sleep | 32       | Microseconds to sleep between LRU crawls     |
-| lru_crawler_tocrawl| 32u     | Max items to crawl per slab per run          |
+| lru_crawler_tocrawl                                                         |
+|                   | 32u     | Max items to crawl per slab per run           |
+| lru_maintainer_thread                                                       |
+|                   | bool    | Split LRU mode and background threads         |
+| hot_lru_pct       | 32      | Pct of slab memory reserved for HOT LRU       |
+| warm_lru_pct      | 32      | Pct of slab memory reserved for WARM LRU      |
+| expirezero_does_not_evict                                                   |
+|                   | bool    | If yes, items with 0 exptime cannot evict     |
 |-------------------+----------+----------------------------------------------|
 
 
@@ -657,6 +694,10 @@ Name                   Meaning
 ------------------------------
 number                 Number of items presently stored in this class. Expired
                        items are not automatically excluded.
+number_hot             Number of items presently stored in the HOT LRU.
+number_warm            Number of items presently stored in the WARM LRU.
+number_cold            Number of items presently stored in the COLD LRU.
+number_noexp           Number of items presently stored in the NOEXP class.
 age                    Age of the oldest item in the LRU.
 evicted                Number of times an item had to be evicted from the LRU
                        before it expired.
@@ -679,6 +720,14 @@ expired_unfetched      Number of expired items reclaimed from the LRU which
 evicted_unfetched      Number of valid items evicted from the LRU which were
                        never touched after being set.
 crawler_reclaimed      Number of items freed by the LRU Crawler.
+lrutail_reflocked      Number of items found to be refcount locked in the
+                       LRU tail.
+moves_to_cold          Number of items moved from HOT or WARM into COLD.
+moves_to_warm          Number of items moved from COLD to WARM.
+moves_within_lru       Number of times active items were bumped within
+                       HOT or WARM.
+direct_reclaims        Number of times worker threads had to directly pull LRU
+                       tails to find memory for a new item.
 
 Note this will only display information about slabs which exist, so an empty
 cache will return an empty set.
@@ -697,7 +746,7 @@ you could prevent memcached from serving requests for several seconds.
 
 The data is returned in the following format:
 
-<size> <count>\r\n
+STAT <size> <count>\r\n
 
 The server terminates this list with the line
 

@@ -7,7 +7,6 @@
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
-#include <errno.h>
 #include <string.h>
 #include <pthread.h>
 
@@ -37,8 +36,8 @@ struct conn_queue {
     pthread_mutex_t lock; //Ò»¸ö¶ÓÁÐ¾Í¶ÔÓ¦Ò»¸öËø
 };
 
-/* Lock for cache operations (item_*, assoc_*) */
-pthread_mutex_t cache_lock;
+/* Locks for cache LRU operations */
+pthread_mutex_t lru_locks[POWER_LARGEST];
 
 /* Connection lock around accepting new connections */
 pthread_mutex_t conn_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -48,25 +47,21 @@ pthread_mutex_t atomics_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 /* Lock for global stats */
-static pthread_mutex_t stats_lock;
+static pthread_mutex_t stats_lock = PTHREAD_MUTEX_INITIALIZER;
+
+/* Lock to cause worker threads to hang up after being woken */
+static pthread_mutex_t worker_hang_lock;
 
 /* Free list of CQ_ITEM structs */
 static CQ_ITEM *cqi_freelist;
 static pthread_mutex_t cqi_freelist_lock;
 
-//¿ÉÒÔ²Î¿¼http://blog.csdn.net/luotuo44/article/details/42913549
-static pthread_mutex_t *item_locks; //³õÊ¼»¯ºÍ¸³Öµ¼ûthread_init
+static pthread_mutex_t *item_locks;
 /* size of the item lock hash table */
 static uint32_t item_lock_count;
-
-
-static unsigned int item_lock_hashpower;
+unsigned int item_lock_hashpower;
 #define hashsize(n) ((unsigned long int)1<<(n))
 #define hashmask(n) (hashsize(n)-1)
-/* this lock is temporarily engaged during a hash table expansion */
-static pthread_mutex_t item_global_lock;
-/* thread-specific variable for deeply finding the item lock type */
-static pthread_key_t item_lock_type_key; ////Ïß³ÌË½ÓÐÊý¾ÝµÄ¼üÖµ    ²»Í¬Ïß³ÌµÄÐÞ¸Ä»¥²»¸ÉÈÅ
 
 static LIBEVENT_DISPATCHER_THREAD dispatcher_thread;
 
@@ -116,34 +111,18 @@ unsigned short refcount_decr(unsigned short *refcount) {
 #endif
 }
 
-/* Convenience functions for calling *only* when in ITEM_LOCK_GLOBAL mode */
-void item_lock_global(void) {
-    mutex_lock(&item_global_lock);
-}
-
-void item_unlock_global(void) {
-    mutex_unlock(&item_global_lock);
-}
+/* item_lock() must be held for an item before any modifications to either its
+ * associated hash bucket, or the structure itself.
+ * LRU modifications must hold the item lock, and the LRU lock.
+ * LRU's accessing items must item_trylock() before modifying an item.
+ * Items accessable from an LRU must not be freed or modified
+ * without first locking and removing from the LRU.
+ */
 
 void item_lock(uint32_t hv) {
-    uint8_t *lock_type = pthread_getspecific(item_lock_type_key); //»ñÈ¡Ïß³ÌË½ÓÐ±äÁ¿  
-    //likelyÕâ¸öºê¶¨ÒåÓÃÓÚ´úÂëÖ¸ÁîÓÅ»¯  
-    //likely(*lock_type == ITEM_LOCK_GRANULAR)ÓÃÀ´¸æËß±àÒëÆ÷  
-    //*lock_typeµÈÓÚITEM_LOCK_GRANULARµÄ¿ÉÄÜÐÔºÜ´ó  
-    if (likely(*lock_type == ITEM_LOCK_GRANULAR)) {
-        mutex_lock(&item_locks[hv & hashmask(item_lock_hashpower)]); //¶ÔÄ³Ð©Í°µÄitem¼ÓËø  
-    } else {
-        mutex_lock(&item_global_lock);//¶ÔËùÓÐitem¼ÓËø  
-    }
+    mutex_lock(&item_locks[hv & hashmask(item_lock_hashpower)]);
 }
 
-/* Special case. When ITEM_LOCK_GLOBAL mode is enabled, this should become a
- * no-op, as it's only called from within the item lock if necessary.
- * However, we can't mix a no-op and threads which are still synchronizing to
- * GLOBAL. So instead we just always try to lock. When in GLOBAL mode this
- * turns into an effective no-op. Threads re-synchronize after the power level
- * switch so it should stay safe.
- */
 void *item_trylock(uint32_t hv) {
     pthread_mutex_t *lock = &item_locks[hv & hashmask(item_lock_hashpower)];
     if (pthread_mutex_trylock(lock) == 0) {
@@ -157,12 +136,7 @@ void item_trylock_unlock(void *lock) {
 }
 
 void item_unlock(uint32_t hv) {
-    uint8_t *lock_type = pthread_getspecific(item_lock_type_key);
-    if (likely(*lock_type == ITEM_LOCK_GRANULAR)) {
-        mutex_unlock(&item_locks[hv & hashmask(item_lock_hashpower)]);
-    } else {
-        mutex_unlock(&item_global_lock);
-    }
+    mutex_unlock(&item_locks[hv & hashmask(item_lock_hashpower)]);
 }
 
 /*
@@ -181,38 +155,43 @@ static void register_thread_initialized(void) {
     init_count++;
     pthread_cond_signal(&init_cond);
     pthread_mutex_unlock(&init_lock);
+    /* Force worker threads to pile up if someone wants us to */
+    pthread_mutex_lock(&worker_hang_lock);
+    pthread_mutex_unlock(&worker_hang_lock);
 }
-
-/*
-    Ç¨ÒÆÏß³ÌÎªÊ²Ã´ÒªÕâÃ´ÓØ»ØÇúÕÛµØÇÐ»»workersÏß³ÌµÄËøÀàÐÍÄØ£¿Ö±½ÓÐÞ¸ÄËùÓÐÏß³ÌµÄLIBEVENT_THREAD½á¹¹µÄitem_lock_type
- ³ÉÔ±±äÁ¿²»¾ÍÐÐÁËÂð£¿
-    ÕâÖ÷ÒªÊÇÒòÎªÇ¨ÒÆÏß³Ì²»ÖªµÀworkerÏß³Ì´Ë¿ÌÔÚ¸ÉÐ©Ê²Ã´¡£Èç¹ûworkerÏß³ÌÕýÔÚ·ÃÎÊitem£¬²¢ÇÀÕ¼ÁË¶Î¼¶±ðËø¡£´ËÊ±Äã°Ñworker
- Ïß³ÌµÄËøÇÐ»»µ½È«¾ÖËø£¬µÈworkerÏß³Ì½âËøµÄÊ±ºò¾Í»á½âÈ«¾ÖËø(²Î¿¼Ç°ÃæµÄitem_lockºÍitem_unlock´úÂë)£¬ÕâÑù³ÌÐò¾Í±ÀÀ£ÁË¡£
- ËùÒÔ²»ÄÜÇ¨ÒÆÏß³ÌÈ¥ÇÐ»»£¬Ö»ÄÜÇ¨ÒÆÏß³ÌÍ¨ÖªworkerÏß³Ì£¬È»ºóworkerÏß³Ì×Ô¼ºÈ¥ÇÐ»»¡£µ±È»ÊÇÒªworkerÏß³ÌÃ¦ÍêÁËÊÖÍ·ÉÏµÄÊÂÇé
- ºó£¬²Å»áÈ¥ÐÞ¸ÄÇÐ»»µÄ¡£ËùÒÔÇ¨ÒÆÏß³ÌÔÚÍ¨ÖªÍêËùÓÐµÄworkerÏß³Ìºó£¬»áµ÷ÓÃwait_for_thread_registrationº¯ÊýÐÝÃßµÈ´ýËùÓÐµÄ
- workerÏß³Ì¶¼ÇÐ»»µ½Ö¸¶¨µÄËøÀàÐÍºó²ÅÐÑÀ´¡£
-*/
 
 //¹¤×÷×ÓÏß³Ì¶Á¹ÜµÀÓÐÊý¾Ýµ½À´£¬thread_libevent_process´Ó¶Á¹ÜµÀ¶ÁÈ¡µ½ÐÅÏ¢  
 //¶ÔÓ¦µÄÖ÷Ïß³ÌÐ´¹ÜµÀÔÚdispatch_conn_new»òÕßswitch_item_lock_type
-
-//¹þÏ£±íÇ¨ÒÆÏß³Ì»áÔÚassoc.cÎÄ¼þÖÐµÄassoc_maintenance_threadº¯Êýµ÷ÓÃswitch_item_lock_typeº¯Êý£¬ÈÃËùÓÐµÄ
-//workersÏß³Ì¶¼ÇÐ»»µ½¶Î¼¶±ðËø»òÕßÈ«¾Ö¼¶±ðËø
-void switch_item_lock_type(enum item_lock_types type) { //º¯Êýthread_libevent_process½ÓÊÕl »òÕßgÐÅÏ¢
+void pause_threads(enum pause_thread_types type) {
     char buf[1];
     int i;
 
+    buf[0] = 0;
     switch (type) {
-        case ITEM_LOCK_GRANULAR:
-            buf[0] = 'l';//ÓÃl±íÊ¾ITEM_LOCK_GRANULAR ¶Î¼¶±ðËø  
+        case PAUSE_ALL_THREADS:
+            slabs_rebalancer_pause();
+            lru_crawler_pause();
+            lru_maintainer_pause();
+        case PAUSE_WORKER_THREADS:
+            buf[0] = 'p';
+            pthread_mutex_lock(&worker_hang_lock);
             break;
-        case ITEM_LOCK_GLOBAL:
-            buf[0] = 'g';//ÓÃg±íÊ¾ITEM_LOCK_GLOBAL È«¾Ö¼¶±ðËø  
+        case RESUME_ALL_THREADS:
+            slabs_rebalancer_resume();
+            lru_crawler_resume();
+            lru_maintainer_resume();
+        case RESUME_WORKER_THREADS:
+            pthread_mutex_unlock(&worker_hang_lock);
             break;
-        default: //Í¨¹ýÏòworker¼àÌýµÄ¹ÜµÀÐ´ÈëÒ»¸ö×Ö·ûÍ¨ÖªworkerÏß³Ì  
+        default:
             fprintf(stderr, "Unknown lock type: %d\n", type);
             assert(1 == 0);
             break;
+    }
+
+    /* Only send a message if we have one. */
+    if (buf[0] == 0) {
+        return;
     }
 
     pthread_mutex_lock(&init_lock);
@@ -223,7 +202,6 @@ void switch_item_lock_type(enum item_lock_types type) { //º¯Êýthread_libevent_pr
             /* TODO: This is a fatal problem. Can it ever happen temporarily? */
         }
     }
-    //µÈ´ýËùÓÐµÄworkersÏß³Ì¶¼°ÑËøÇÐ»»µ½typeÖ¸Ã÷µÄËøÀàÐÍ  
     wait_for_thread_registration(settings.num_threads);
     pthread_mutex_unlock(&init_lock);
 }
@@ -342,13 +320,12 @@ static void cqi_free(CQ_ITEM *item) {
  * Creates a worker thread.
  */
 static void create_worker(void *(*func)(void *), void *arg) {
-    pthread_t       thread;
     pthread_attr_t  attr;
     int             ret;
 
     pthread_attr_init(&attr);
 
-    if ((ret = pthread_create(&thread, &attr, func, arg)) != 0) {
+    if ((ret = pthread_create(&((LIBEVENT_THREAD*)arg)->thread_id, &attr, func, arg)) != 0) {
         fprintf(stderr, "Can't create thread: %s\n",
                 strerror(ret));
         exit(1);
@@ -382,6 +359,7 @@ void accept_new_conns(const bool do_accept) {
 
  * Set up a thread's information.
  */
+
 static void setup_thread(LIBEVENT_THREAD *me) {
 	//ÐÂ½¨Ò»¸öevent_base
     me->base = event_init();
@@ -428,19 +406,9 @@ static void setup_thread(LIBEVENT_THREAD *me) {
 static void *worker_libevent(void *arg) {
     LIBEVENT_THREAD *me = arg;
 
-    /* Any per-thread setup can happen here; thread_init() will block until
+    /* Any per-thread setup can happen here; memcached_thread_init() will block until
      * all threads have finished initializing.
      */
-
-    /* set an indexable thread-specific memory item for the lock type.
-     * this could be unnecessary if we pass the conn *c struct through
-     * all item_lock calls...
-     */
-    me->item_lock_type = ITEM_LOCK_GRANULAR;//³õÊÔ×´Ì¬Ê¹ÓÃ¶Î¼¶±ðËø  
-    //ÎªworkersÏß³ÌÉèÖÃÏß³ÌË½ÓÐÊý¾Ý  
-    //ÒòÎªËùÓÐµÄworkersÏß³Ì¶¼»áµ÷ÓÃÕâ¸öº¯Êý£¬ËùÒÔËùÓÐµÄworkersÏß³Ì¶¼ÉèÖÃÁËÏàÍ¬¼üÖµµÄ  
-    //Ïß³ÌË½ÓÐÊý¾Ý  
-    pthread_setspecific(item_lock_type_key, &me->item_lock_type);
 
     register_thread_initialized();
 
@@ -452,7 +420,7 @@ static void *worker_libevent(void *arg) {
 /*
  * Processes an incoming "handle a new connection" item. This is called when
  * input arrives on the libevent wakeup pipe.
- */ 
+ */
 //thread_libevent_processÕâ¸ö¹ÜµÀÊÂ¼þ»Øµ÷Ê¹ÓÃÓÚÖ÷Ïß³Ì½ÓÊÜµ½¿Í»§¶ËÁ¬½ÓºóÍ¨Öª¹¤×÷×ÓÏß³ÌÖØÐÂ´´½¨Ò»¸öÐÂµÄ
 //conn£¬ÔÚconn_newÖØÐÂÉèÖÃÍøÂçÊÂ¼þ»Øµ÷º¯Êýconn_new->event_handler
  
@@ -495,28 +463,21 @@ static void thread_libevent_process(int fd, short which, void *arg) {
     }
         break;
     //switch_item_lock_type´¥·¢×ßµ½ÕâÀï
-    /* we were told to flip the lock type and report in */
-    case 'l': //²Î¿¼switch_item_lock_type //ÇÐ»»itemµ½¶Î¼¶±ð  
-    //»½ÐÑË¯ÃßÔÚinit_condÌõ¼þ±äÁ¿ÉÏµÄÇ¨ÒÆÏß³Ì  
-    me->item_lock_type = ITEM_LOCK_GRANULAR;
-    register_thread_initialized();
-        break;
-    case 'g'://ÇÐ»»itemËøµ½È«¾Ö¼¶±ð  
-    me->item_lock_type = ITEM_LOCK_GLOBAL;
+    /* we were told to pause and report in */
+    case 'p':
     register_thread_initialized();
         break;
     }
 }
 
 /* Which thread we assigned a connection to most recently. */
-static int last_thread = -1; 
+static int last_thread = -1;
 
 /*
  * Dispatches a new connection to another thread. This is only ever called
  * from the main thread, either during initialization (for UDP) or because
  * of an incoming connection.
  */
-
 /*
 Ã¿¸öÏß³Ì¶¼ÊÇÒ»¸öµ¥¶ÀµÄlibeventÊµÀý,Ö÷Ïß³Ìeventloop¸ºÔð´¦Àí¼àÌýfd£¬¼àÌý¿Í»§¶ËµÄ½¨Á¢Á¬½ÓÇëÇó£¬ÒÔ¼°
 acceptÁ¬½Ó£¬½«ÒÑ½¨Á¢µÄÁ¬½Óround robinµ½¸÷¸öworker¡£workersÏß³Ì¸ºÔð´¦ÀíÒÑ¾­½¨Á¢ºÃµÄÁ¬½ÓµÄ¶ÁÐ´µÈÊÂ¼þ
@@ -540,7 +501,7 @@ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
 	//ÂÖÑ¯µÄ·½Ê½Ñ¡¶¨Ò»¸öworkerÏß³Ì
     int tid = (last_thread + 1) % settings.num_threads;
 
-    LIBEVENT_THREAD *thread = threads + tid; //ÂÖÑ¯Ñ¡ÔñÓÉÄÇ¸ö¹¤×÷ÏÖ³¡À´´¦Àí
+    LIBEVENT_THREAD *thread = threads + tid;
 
     last_thread = tid;
 
@@ -634,10 +595,9 @@ void item_remove(item *item) {
  * Replaces one item with another in the hashtable.
  * Unprotected by a mutex lock since the core server does not require
  * it to be thread-safe.
- *///°Ñ¾ÉµÄÉ¾³ý£¬²åÈëÐÂµÄ¡£replaceÃüÁî»áµ÷ÓÃ±¾º¯Êý.  
-//ÎÞÂÛ¾ÉitemÊÇ·ñÓÐÆäËûworkerÏß³ÌÔÚÒýÓÃ£¬¶¼ÊÇÖ±½Ó½«Ö®´Ó¹þÏ£±íºÍLRU¶ÓÁÐÖÐÉ¾³ý  
-int item_replace(item *old_it, item *new_it, const uint32_t hv) { //ÕâÀïÃæ»áunlink old_it,È»ºólink new_it
-    return do_item_replace(old_it, new_it, hv); //×¢ÒâÕâÀïÃæold_it->refcount»á¼õ1£¬new_it»áÔö1
+ */
+int item_replace(item *old_it, item *new_it, const uint32_t hv) {
+    return do_item_replace(old_it, new_it, hv);
 }
 
 /*
@@ -665,7 +625,7 @@ void item_update(item *item) {
 
 /*
  * Does arithmetic on a numeric item value.
- */ //incºÍdecÃüÁî´¦Àí
+ */
 enum delta_result_type add_delta(conn *c, const char *key,
                                  const size_t nkey, int incr,
                                  const int64_t delta, char *buf,
@@ -683,7 +643,7 @@ enum delta_result_type add_delta(conn *c, const char *key,
 /*
  * Stores an item in the cache (high level, obeys set/add/replace semantics)
  */
-enum store_item_type store_item(item *item, int comm, conn* c) { //×¢Òâ¸Ãº¯ÊýÍâ²ãÔÚ¸Ãº¯ÊýÖ´ÐÐÍêºóÒ»°ã»áµ÷ÓÃÒ»´Îitem_remove
+enum store_item_type store_item(item *item, int comm, conn* c) {
     enum store_item_type ret;
     uint32_t hv;
 
@@ -692,99 +652,6 @@ enum store_item_type store_item(item *item, int comm, conn* c) { //×¢Òâ¸Ãº¯ÊýÍâ²
     ret = do_store_item(item, comm, c, hv);
     item_unlock(hv);
     return ret;
-}
-
-/*
- * Flushes expired items after a flush_all call
- */
-void item_flush_expired() {
-    mutex_lock(&cache_lock);
-    do_item_flush_expired();
-    mutex_unlock(&cache_lock);
-}
-
-/*
- stats cachedump 4 100
-ITEM foo_rand112722700000 [100 b; 1462575443 s]
-ITEM foo_rand841447400000 [100 b; 1462575443 s]
-ITEM foo_rand708137200000 [100 b; 1462575443 s]
-ITEM foo_rand435945600000 [100 b; 1462575443 s]
-ITEM foo_rand708670400000 [100 b; 1462575443 s]
-ITEM foo_rand606717400000 [100 b; 1462575443 s]
-ITEM foo_rand000000000000 [100 b; 1462575443 s]
-ITEM foo_rand718332000000 [100 b; 1462575443 s]
-ITEM foo_rand264939300000 [100 b; 1462575443 s]
-ITEM foo_rand966316900000 [100 b; 1462575443 s]
-END
-stats cachedump 5 100
-END
-stats cachedump 4 1
-ITEM foo_rand112722700000 [100 b; 1462575443 s]
-END
-stats cachedump 4 20
-ITEM foo_rand112722700000 [100 b; 1462575443 s]
-ITEM foo_rand841447400000 [100 b; 1462575443 s]
-ITEM foo_rand708137200000 [100 b; 1462575443 s]
-ITEM foo_rand435945600000 [100 b; 1462575443 s]
-ITEM foo_rand708670400000 [100 b; 1462575443 s]
-ITEM foo_rand606717400000 [100 b; 1462575443 s]
-ITEM foo_rand000000000000 [100 b; 1462575443 s]
-ITEM foo_rand718332000000 [100 b; 1462575443 s]
-ITEM foo_rand264939300000 [100 b; 1462575443 s]
-ITEM foo_rand966316900000 [100 b; 1462575443 s]
-END
-
-ERROR
-set yang 0 0 100 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
-STORED
-stats cachedump 4 100
-ITEM yang [100 b; 1462575443 s]
-ITEM foo_rand112722700000 [100 b; 1462575443 s]
-ITEM foo_rand841447400000 [100 b; 1462575443 s]
-ITEM foo_rand708137200000 [100 b; 1462575443 s]
-ITEM foo_rand435945600000 [100 b; 1462575443 s]
-ITEM foo_rand708670400000 [100 b; 1462575443 s]
-ITEM foo_rand606717400000 [100 b; 1462575443 s]
-ITEM foo_rand000000000000 [100 b; 1462575443 s]
-ITEM foo_rand718332000000 [100 b; 1462575443 s]
-ITEM foo_rand264939300000 [100 b; 1462575443 s]
-ITEM foo_rand966316900000 [100 b; 1462575443 s]
-*/
-/*
- * Dumps part of the cache
- */
-char *item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes) {
-    char *ret;
-
-    mutex_lock(&cache_lock);
-    ret = do_item_cachedump(slabs_clsid, limit, bytes);
-    mutex_unlock(&cache_lock);
-    return ret;
-}
-
-/*
- * Dumps statistics about slab classes
- */
-void  item_stats(ADD_STAT add_stats, void *c) {
-    mutex_lock(&cache_lock);
-    do_item_stats(add_stats, c);
-    mutex_unlock(&cache_lock);
-}
-
-void  item_stats_totals(ADD_STAT add_stats, void *c) {
-    mutex_lock(&cache_lock);
-    do_item_stats_totals(add_stats, c);
-    mutex_unlock(&cache_lock);
-}
-
-/*
- * Dumps a list of objects of each size in 32-byte increments
- */
-void  item_stats_sizes(ADD_STAT add_stats, void *c) {
-    mutex_lock(&cache_lock);
-    do_item_stats_sizes(add_stats, c);
-    mutex_unlock(&cache_lock);
 }
 
 /******************************* GLOBAL STATS ******************************/
@@ -912,13 +779,14 @@ void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out) {
  */
  //²ÎÊýnthreadÊÇwokerÏß³ÌµÄÊýÁ¿¡£main_baseÔòÊÇÖ÷Ïß³ÌµÄevent_base
  //Ö÷Ïß³ÌÔÚmainº¯Êýµ÷ÓÃ±¾º¯Êý£¬´´½¨nthreads¸öworkerÏß³Ì
-void thread_init(int nthreads, struct event_base *main_base) {
+void memcached_thread_init(int nthreads, struct event_base *main_base) {
     int         i;
     int         power;
 
 	//ÉêÇëÒ»¸öCQ_ITEMÊ±ÐèÒª¼ÓËø
-    pthread_mutex_init(&cache_lock, NULL);
-    pthread_mutex_init(&stats_lock, NULL);
+        pthread_mutex_init(&lru_locks[i], NULL);
+    }
+    pthread_mutex_init(&worker_hang_lock, NULL);
 
     pthread_mutex_init(&init_lock, NULL);
     pthread_cond_init(&init_cond, NULL);
@@ -938,10 +806,16 @@ void thread_init(int nthreads, struct event_base *main_base) {
         power = 13;
     }
 
+    if (power >= hashpower) {
+        fprintf(stderr, "Hash table power size (%d) cannot be equal to or less than item lock table (%d)\n", hashpower, power);
+        fprintf(stderr, "Item lock table grows with `-t N` (worker threadcount)\n");
+        fprintf(stderr, "Hash table grows with `-o hashpower=N` \n");
+        exit(1);
+    }
+
     item_lock_count = hashsize(power);
     item_lock_hashpower = power;
 
-    //¹þÏ£±íÖÐ¶Î¼¶±ðµÄËø¡£²¢²»ÊÇÒ»¸öÍ°¾Í¶ÔÓ¦ÓÐÒ»¸öËø¡£¶øÊÇ¶à¸öÍ°¹²ÓÃÒ»¸öËø  
     item_locks = calloc(item_lock_count, sizeof(pthread_mutex_t));
     if (! item_locks) {
         perror("Can't allocate item locks");
@@ -950,8 +824,6 @@ void thread_init(int nthreads, struct event_base *main_base) {
     for (i = 0; i < item_lock_count; i++) {
         pthread_mutex_init(&item_locks[i], NULL);
     }
-    pthread_key_create(&item_lock_type_key, NULL);
-    pthread_mutex_init(&item_global_lock, NULL);
 
 	//ÉêÇë¾ßÓÐnthreads¸öÔªËØµÄLIBEVENT_THREADÊý¾Ý
     threads = calloc(nthreads, sizeof(LIBEVENT_THREAD));
@@ -987,7 +859,7 @@ void thread_init(int nthreads, struct event_base *main_base) {
 		//´´½¨Ïß³Ì£¬Ïß³Ìº¯ÊýÎªworker_libevent£¬Ïß³Ì²ÎÊýÎª&thread[i]
         create_worker(worker_libevent, &threads[i]);
     }
-    
+
     /* Wait for all the threads to set themselves up before returning. */
     pthread_mutex_lock(&init_lock);
     wait_for_thread_registration(nthreads); //Ö÷Ïß³Ì×èÈûµÈ´ýÊÂ¼þµ½À´
