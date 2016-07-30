@@ -74,17 +74,17 @@ am__installdirs = "$(DESTDIR)$(man1dir)"
 NROFF = nroff
 MANS = $(man_MANS)
 DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
-ACLOCAL = ${SHELL} /root/yangyazhou/git_yyz/memcached-1.4/missing --run aclocal-1.11
-AMTAR = ${SHELL} /root/yangyazhou/git_yyz/memcached-1.4/missing --run tar
-AUTOCONF = ${SHELL} /root/yangyazhou/git_yyz/memcached-1.4/missing --run autoconf
-AUTOHEADER = ${SHELL} /root/yangyazhou/git_yyz/memcached-1.4/missing --run autoheader
-AUTOMAKE = ${SHELL} /root/yangyazhou/git_yyz/memcached-1.4/missing --run automake-1.11
+ACLOCAL = ${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run aclocal-1.11
+AMTAR = ${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run tar
+AUTOCONF = ${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run autoconf
+AUTOHEADER = ${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run autoheader
+AUTOMAKE = ${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run automake-1.11
 AWK = gawk
 CC = gcc -std=gnu99
 CCDEPMODE = depmode=gcc3
 CFLAGS = -g -O2 -pthread -pthread -Wall -Werror -pedantic -Wmissing-prototypes -Wmissing-declarations -Wredundant-decls -fno-strict-aliasing
 CPP = gcc -E
-CPPFLAGS = -I/usr/local/libevent/include 
+CPPFLAGS = 
 CYGPATH_W = echo
 DEFS = -DHAVE_CONFIG_H
 DEPDIR = .deps
@@ -102,11 +102,11 @@ INSTALL_DATA = ${INSTALL} -m 644
 INSTALL_PROGRAM = ${INSTALL}
 INSTALL_SCRIPT = ${INSTALL}
 INSTALL_STRIP_PROGRAM = $(install_sh) -c -s
-LDFLAGS = -L/usr/local/libevent/lib  -Wl,-rpath,/usr/local/libevent/lib
+LDFLAGS = 
 LIBOBJS = 
 LIBS = -levent -lrt 
 LTLIBOBJS = 
-MAKEINFO = ${SHELL} /root/yangyazhou/git_yyz/memcached-1.4/missing --run makeinfo
+MAKEINFO = ${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run makeinfo
 MKDIR_P = /bin/mkdir -p
 OBJEXT = o
 PACKAGE = memcached
@@ -126,10 +126,10 @@ STRIP =
 VERSION = 1.4.21
 XML2RFC = no
 XSLTPROC = /usr/bin/xsltproc
-abs_builddir = /root/yangyazhou/git_yyz/memcached-1.4/doc
-abs_srcdir = /root/yangyazhou/git_yyz/memcached-1.4/doc
-abs_top_builddir = /root/yangyazhou/git_yyz/memcached-1.4
-abs_top_srcdir = /root/yangyazhou/git_yyz/memcached-1.4
+abs_builddir = /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc
+abs_srcdir = /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc
+abs_top_builddir = /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4
+abs_top_srcdir = /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4
 ac_ct_CC = gcc
 am__include = include
 am__leading_dot = .
@@ -156,7 +156,7 @@ host_vendor = unknown
 htmldir = ${docdir}
 includedir = ${prefix}/include
 infodir = ${datarootdir}/info
-install_sh = ${SHELL} /root/yangyazhou/git_yyz/memcached-1.4/install-sh
+install_sh = ${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/install-sh
 libdir = ${exec_prefix}/lib
 libexecdir = ${exec_prefix}/libexec
 localedir = ${datarootdir}/locale
@@ -425,10 +425,10 @@ uninstall-man: uninstall-man1
 
 
 protocol-binary.txt: $(.TARGET:R).full
-	no -c /root/yangyazhou/git_yyz/memcached-1.4/doc $(.TARGET:R).full $@
+	no -c /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc $(.TARGET:R).full $@
 
 protocol-binary-range.txt: $(.TARGET:R).full
-	no -c /root/yangyazhou/git_yyz/memcached-1.4/doc $(.TARGET:R).full $@
+	no -c /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc $(.TARGET:R).full $@
 
 protocol-binary.full: $(.TARGET:R).xml xml2rfc/rfc2629-noinc.xsl
 	/usr/bin/xsltproc --nonet xml2rfc/rfc2629-noinc.xsl $(.TARGET:R).xml > $@

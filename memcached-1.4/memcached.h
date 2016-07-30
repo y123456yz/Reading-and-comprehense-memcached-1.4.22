@@ -76,12 +76,10 @@
 #endif
 
 /* Slab sizing definitions. */
-#define POWER_SMALLEST 1
-#define POWER_LARGEST  256 /* actual cap is 255 */
-#define SLAB_GLOBAL_PAGE_POOL 0 /* magic slab class for storing pages for reassignment */
+#define POWER_SMALLEST 1 //´Ó1¿ªÊ¼£¬ slabclassÊı×é´Ó1¿ªÊ¼£¬¼ûslabs_init
+#define POWER_LARGEST  200
 #define CHUNK_ALIGN_BYTES 8
-/* slab class max is a 6-bit number, -1. */
-#define MAX_NUMBER_OF_SLAB_CLASSES (63 + 1)
+#define MAX_NUMBER_OF_SLAB_CLASSES (POWER_LARGEST + 1)
 
 /** How long an object can reasonably be assumed to be locked before
     harvesting it on a low memory condition. Default: disabled. */
@@ -110,8 +108,6 @@
 #define ITEM_ntotal(item) (sizeof(struct _stritem) + (item)->nkey + 1 \
          + (item)->nsuffix + (item)->nbytes \
          + (((item)->it_flags & ITEM_CAS) ? sizeof(uint64_t) : 0))
-
-#define ITEM_clsid(item) ((item)->slabs_clsid & ~(3<<6))
 
 #define STAT_KEY_LEN 128
 #define STAT_VAL_LEN 128
@@ -195,12 +191,19 @@ enum network_transport {
     udp_transport
 };
 
-enum pause_thread_types {
-    PAUSE_WORKER_THREADS = 0,
-    PAUSE_ALL_THREADS,
-    RESUME_ALL_THREADS,
-    RESUME_WORKER_THREADS
-};
+/*
+    Èç¹ûÖ»Ê¹ÓÃÒ»¸öËø£¬ÇÀµ½ËøÄÜÊ¹ÓÃ¹şÏ£±í£¬ÇÀ²»µ½Ôò²»ÄÜÊ¹ÓÃ¡£ÄÇÃ´memcachedµÄĞ§ÂÊ½«±äµÃÏàµ±µÍ¡£Îª´Ë£¬memcached²É
+ÓÃÀàËÆÊı¾İ¿âµÄ²ßÂÔ£ºÊ¹ÓÃ²»Í¬¼¶±ğµÄËø¡£memcached¶¨ÒåÁËÁ½¸ö¼¶±ğµÄËø£º¶Î¼¶±ğºÍÈ«¾Ö¼¶±ğ¡£ÔÚÆ½Ê±(²»½øĞĞ¹şÏ£±íÀ©
+Õ¹Ê±)£¬Ê¹ÓÃ¶Î¼¶±ğµÄËø¡£ÔÚÀ©Õ¹¹şÏ£±íÊ±£¬Ê¹ÓÃÈ«¾Ö¼¶±ğµÄËø¡£
+    ¶Î¼¶±ğÊÇÊ²Ã´¼¶±ğ£¿½«¹şÏ£±í°´ÕÕ¼¸¸öÍ°Ò»¶Î¼¸¸öÍ°Ò»¶ÎµØÆ½¾ù·Ö£¬Ò»¸ö¶Î¶ÔÓ¦ÓĞ¶à¸öÍ°£¬Ã¿Ò»¸ö¶Î¶ÔÓ¦ÓĞÒ»¸öËø¡£ËùÒÔ
+Õû¸ö¹şÏ£±íÓĞ¶à¸ö¶Î¼¶±ğËø¡£ÓÉÓÚ¶Î¼¶±ğËøµÄÊıÁ¿ÔÚ³ÌĞòµÄÒ»¿ªÊ¼¾ÍÒÑ¾­È·¶¨ÁË£¬²»»áÔÙ±äµÄÁË¡£¶øËæ×Å¹şÏ£±íµÄÀ©Õ¹£¬Í°µÄ
+ÊıÁ¿ÊÇ»áÔö¼ÓµÄ¡£ËùÒÔËæ×Å¹şÏ£±íµÄÀ©Õ¹£¬Ô½À´Ô½¶àµÄÍ°¶ÔÓ¦Ò»¸ö¶Î£¬Ò²¾ÍÊÇËµÔ½À´Ô½¶àµÄÍ°¶ÔÓ¦Ò»¸öËø¡£
+*/
+//²Î¿¼http://blog.csdn.net/luotuo44/article/details/42913549
+enum item_lock_types {//itemËø¼¶±ğ  
+    ITEM_LOCK_GRANULAR = 0, //¶Î¼¶±ğ  
+    ITEM_LOCK_GLOBAL //È«¾Ö¼¶±ğ  
+}; 
 
 #define IS_UDP(x) (x == udp_transport)
 
@@ -231,8 +234,8 @@ struct slab_stats { //´æ´¢ÓÚthread_stats->slab_stats
     uint64_t  delete_hits;
     uint64_t  cas_hits;
     uint64_t  cas_badval;
-    uint64_t  incr_hits;
-    uint64_t  decr_hits;
+    uint64_t  incr_hits; //incÃüÁîÖ´ĞĞ´ÎÊı
+    uint64_t  decr_hits; //decÃüÁîÖ´ĞĞ´ÎÊı
 };
 
 /**
@@ -269,7 +272,6 @@ struct stats_t { //struct stats_t stats;
     unsigned int  curr_conns; //µ±Ç°ÒÑÊ¹ÓÃconn½á¹¹ÊıÄ¿  conn_new×ÔÔö£¬conn_close×Ô¼õ¡£°üÀ¨listenÊ¹ÓÃÁËµÄconn
     unsigned int  total_conns; //×Ü¹²Ê¹ÓÃ¹ı¶àÉÙconn½á¹¹£¬Ö»Ôö²»¼õ
     //³¬¹ıÁ´½ÓÏÖÔÚ´Ó¶ø¾Ü¾øÁ´½ÓµÄÁ´½ÓÊı
-
     uint64_t      rejected_conns;
     uint64_t      malloc_fails;
     unsigned int  reserved_fds;
@@ -294,15 +296,7 @@ struct stats_t { //struct stats_t stats;
     uint64_t      evicted_unfetched; /* items evicted but never touched */
     bool          slab_reassign_running; /* slab reassign in progress */ //ÊÇ·ñÕıÔÚ½øĞĞÒ³Ç¨ÒÆ slab_rebalance_finish
     uint64_t      slabs_moved;       /* times slabs were moved around */ //½øĞĞÒ³Ç¨ÒÆµÄ´ÎÊı slab_rebalance_finish
-    uint64_t      slab_reassign_rescues; /* items rescued during slab move */
-    uint64_t      slab_reassign_evictions_nomem; /* valid items lost during slab move */
-    uint64_t      slab_reassign_inline_reclaim; /* valid items lost during slab move */
-    uint64_t      slab_reassign_busy_items; /* valid temporarily unmovable */
-    uint64_t      lru_crawler_starts; /* Number of item crawlers kicked off */
     bool          lru_crawler_running; /* crawl in progress */
-    uint64_t      lru_maintainer_juggles; /* number of LRU bg pokes */
-    uint64_t      time_in_listen_disabled_us;  /* elapsed time in microseconds while server unable to process new connections */
-    struct timeval maxconns_entered;  /* last time maxconns entered */
 };
 
 #define MAX_VERBOSITY_LEVEL 2
@@ -311,7 +305,7 @@ struct stats_t { //struct stats_t stats;
 /**
  * Globally accessible settings as derived from the commandline.
  */
-struct settings {
+struct settings_s {
     size_t maxbytes; //memcachedÄÜ¹»Ê¹ÓÃµÄ×î´óÄÚ´æ
     int maxconns;//×î¶àÔÊĞí¶àÉÙ¸ö¿Í»§¶ËÍ¬Ê±ÔÚÏß¡£²»Í¬ÓÚsetting.backlog
     int port; //¼àÌı¶Ë¿Ú£¬Ä¬ÈÏ11211
@@ -322,8 +316,8 @@ struct settings {
     int verbose;//ÔËĞĞĞÅÏ¢µÄÊä³ö¼¶±ğ¡£¸ÃÖµÔ½´óÊä³öµÄĞÅÏ¢¾ÍÔ½ÏêÏ¸
     //flush_allÃüÁîµÄÊ±¼ä½çÏŞ¡£²åÈëÊ±¼äĞ¡ÓÚÕâ¸öÊ±¼äµÄitemÉ¾³ı
     rel_time_t oldest_live; /* ignore existing items older than this */
-    uint64_t oldest_cas; /* ignore existing items with CAS values lower than this */
-    int evict_to_free; //±ê¼ÇmemcachedÊÇ·ñÔÊĞíLRUÌÔÌ­»úÖÆ¡£Ä¬ÈÏÊÇ¿ÉÒÔµÄ¡£¿ÉÒÔÍ¨¹ı-MÑ¡Ïî½ûÖ¹
+    //±ê¼ÇmemcachedÊÇ·ñÔÊĞíLRUÌÔÌ­»úÖÆ¡£Ä¬ÈÏÊÇ¿ÉÒÔµÄ¡£¿ÉÒÔÍ¨¹ı-MÑ¡Ïî½ûÖ¹
+    int evict_to_free;
     //unix_socket¼àÌıµÄsocketÂ·¾¶£¬Ä¬ÈÏ²»Ê¹ÓÃunix_socket
     char *socketpath;   /* path to unix socket if using local socket */
     //unix socketµÄÈ¨ÏŞĞÅÏ¢
@@ -333,6 +327,7 @@ struct settings {
     int chunk_size;//×îĞ¡µÄÒ»¸öitemÄÜ´æ´¢¶àÉÙ×Ö½ÚµÄÊı¾İ(set¡¢addÃüÁîÖĞµÄÊı¾İ) Ä¬ÈÏ48
     //workerÏß³ÌµÄ¸öÊı
     int num_threads;        /* number of worker (without dispatcher) libevent threads to run */
+    //¶àÉÙ¸öworkerÏß³ÌÎªÒ»¸öudp socket·şÎñ
     int num_threads_per_udp; /* number of worker threads serving each udp socket */
     /*
     °Ñ¸÷ÖÖÒª´æ´¢µÄ¼üÃûÇ°Ãæ¼Ó¸öÇ°×º(prefix),À´±êÊ¶Ò»¶¨µÄÃüÃû¿Õ¼ä,ÕâÑù¸÷ÖÖ¼üÃû×ÖÔÚ±¾ÃüÃû¿Õ¼äÀïÃæÊÇ²»ÄÜÖØ¸´µÄ
@@ -340,7 +335,7 @@ struct settings {
     µ«ÊÇÔÚÕû¸ömemcacheÀïÃæ¿ÉÒÔÖØ¸´ÉèÖÃ,Í¨¹ıÕâ¶Î´úÂë¿ÉÒÔ²é¿´Ä³Ğ©ÃüÃû¿Õ¼ä(prefix)µÄ»ñÈ¡´ÎÊı¡¢ÃüÖĞÂÊ¡¢ÉèÖÃ´ÎÊıµÈÖ¸±ê¡£
     */
     //·Ö¸ô·û  ¿ÉÒÔ²Î¿¼http://www.cnblogs.com/xianbei/archive/2011/01/02/1921258.html
-	char prefix_delimiter;  /* character that marks a key prefix (for stats) */ //Ò»°ã¶àÒµÎñ¹¦ÄÜµÄÊ±ºòÓĞÓÃµ½
+    char prefix_delimiter;  /* character that marks a key prefix (for stats) */ //Ò»°ã¶àÒµÎñ¹¦ÄÜµÄÊ±ºòÓĞÓÃµ½
     //http://www.cnblogs.com/xianbei/archive/2011/01/02/1921258.html
     //ÊÇ·ñ×Ô¶¯ÊÕ¼¯×´Ì¬ĞÅÏ¢  -D²ÎÊı»òÕßstats detail on
     int detail_enabled;     /* nonzero if we're collecting detailed stats */
@@ -361,7 +356,6 @@ struct settings {
 	//¿ÉÒÔÔÚÆô¶¯memcachedÊ±Í¨¹ı-o lru_crawler½«±äÁ¿µÄ¸³ÖµÎªtrue£¬Æô¶¯LRUÅÀ³æÏß³Ì
 	//±ê¼ÇÊÇ·ñÒÑ¾­´´½¨ÅÀ³æÏß³Ì£¬¿ÉÒÔ±ÜÃâÖØ¸´£¬²Î¿¼start_item_crawler_thread
     bool lru_crawler;        /* Whether or not to enable the autocrawler thread */
-
     //ÊÇ·ñ¿ªÆôµ÷½Ú²»Í¬ÀàĞÍitemËùÕ¼ÓÃµÄÄÚ´æÊı¡£¿ÉÒÔÍ¨¹ı-o slab_reassignÑ¡Ïî¿ªÆô
     bool slab_reassign;     /* Whether or not slab reassignment is allowed */
 
@@ -386,6 +380,20 @@ struct settings {
     //ÓÃÓÚĞŞ¸´itemµÄÒıÓÃÊı¡£Èç¹ûÒ»¸öworkerÏß³ÌÒıÓÃÁËÄ³¸öitem£¬»¹Ã»À´µÃ¼°½â³ıÒıÓÃÕâ¸öÏß³Ì¾Í¹ÒÁË
 	//ÄÇÃ´Õâ¸öitem¾ÍÓÀÔ¶±»Õâ¸öÒÑËÀµÄÏß³ÌËùÒıÓÃ¶ø²»ÄÜÊÍ·Å¡£memcachedÓÃÕâ¸öÖµÀ´¼ì²âÊÇ·ñ³öÏÖÕâÖÖ
 	//Çé¿ö¡£ÒòÎªÕâÖÖÇé¿öºÜÉÙ·¢Éú£¬ËùÒÔ¸Ã±äÁ¿µÄÄ¬ÈÏÖµÎª0£¬¼´²»½øĞĞ¼ì²â
+/*
+tail_repair_time£º
+    ¿¼ÂÇÕâÑùµÄÇé¿ö:Ä³¸öworkerÏß³ÌÍ¨¹ırefcount_incrÔö¼ÓÁËÒ»¸öitemµÄÒıÓÃÊı¡£µ«ÓÉÓÚÄ³ÖÖÔ­Òò(¿ÉÄÜÊÇÄÚºË³öÁËÎÊÌâ)£¬
+Õâ¸öworkerÏß³Ì»¹Ã»À´µÃ¼°µ÷ÓÃrefcount_decr¾Í¹ÒÁË¡£´ËÊ±Õâ¸öitemµÄÒıÓÃÊı¾Í¿Ï¶¨²»»áµÈÓÚ0£¬Ò²¾ÍÊÇ×ÜÓĞworkerÏß³ÌÕ¼
+ÓÃ×ÅËü.µ«Êµ¼ÊÉÏÕâ¸öworkerÏß³ÌÔç¾Í¹ÒÁË¡£ËùÒÔ¶ÔÓÚÕâÖÖÇé¿öĞèÒªĞŞ¸´¡£ĞŞ¸´Ò²ºÜ¶à¼òµ¥£ºÖ±½Ó°ÑÕâ¸öitemµÄÒıÓÃ¼ÆÊı¸³ÖµÎª1¡£
+    ¸ù¾İÊ²Ã´ÅĞ¶ÏÄ³Ò»¸öworkerÏß³Ì¹ÒÁËÄØ?Ê×ÏÈÔÚmemcachedÀïÃæ£¬Ò»°ãÀ´Ëµ£¬ÈÎºÎº¯Êı¶¼µÄµ÷ÓÃ¶¼²»»áºÄÊ±Ì«´óµÄ£¬¼´Ê¹Õâ¸öº¯Êı
+ĞèÒª¼ÓËø¡£ËùÒÔÈç¹ûÕâ¸öitemµÄ×îºóÒ»´Î·ÃÎÊÊ±¼ä¾àÀëÏÖÔÚ¶¼±È½ÏÒ£Ô¶ÁË£¬µ«ËüÈ´»¹±»Ò»¸öworkerÏß³ÌËùÒıÓÃ£¬ÄÇÃ´¾Í¼¸ºõ¿É
+ÒÔÅĞ¶ÏÕâ¸öworkerÏß³Ì¹ÒÁË¡£ÔÚ1.4.16°æ±¾Ö®Ç°£¬Õâ¸öÊ±¼ä¾àÀë¶¼ÊÇ¹Ì¶¨µÄÎª3¸öĞ¡Ê±¡£´Ó1.4.16¿ª¾ÍÊ¹ÓÃsettings.tail_repair_time
+´æ´¢Ê±¼ä¾àÀë£¬¿ÉÒÔÔÚÆô¶¯memcachedµÄÊ±ºòÉèÖÃ£¬Ä¬ÈÏÊ±¼ä¾àÀëÎª1¸öĞ¡Ê±¡£ÏÖÔÚÕâ¸ö°æ±¾1.4.21Ä¬ÈÏ¶¼²»½øĞĞÕâ¸öĞŞ¸´ÁË£¬
+settings.tail_repair_timeµÄÄ¬ÈÏÖµÎª0¡£ÒòÎªmemcachedµÄ×÷ÕßºÜÉÙ¿´µ½Õâ¸öbugÁË£¬¹À¼ÆÊÇÒòÎª²Ù×÷ÏµÍ³µÄ½øÒ»²½ÎÈ¶¨¡£
+
+    ´úÂëÖĞµÄsettings.tail_repair_timeÖ¸Ã÷ÓĞÃ»ÓĞ¿ªÆôÕâÖÖ¼ì²â£¬Ä¬ÈÏÊÇÃ»ÓĞ¿ªÆôµÄ(Ä¬ÈÏÖµµÈÓÚ0)¡£¿ÉÒÔÔÚÆô¶¯memcachedµÄÊ±ºò
+Í¨¹ı-o tail_repair_timeÑ¡Ïî¿ªÆô
+*/
     int tail_repair_time;   /* LRU tail refcount leak repair time */
     //ÊÇ·ñÔÊĞí¿Í»§¶ËÊ¹ÓÃflush_allÃüÁî 
     bool flush_enabled;     /* flush_all enabled */
@@ -396,16 +404,11 @@ struct settings {
     //LRUÅÀ³æ¼ì²âÃ¿ÌõLRU¶ÓÁĞÖĞµÄ¶àÉÙ¸öitem£¬Èç¹ûÏëÈÃLRUÅÀ³æ¹¤×÷±ØĞëĞŞ¸ÄÕâ¸öÖµ
     //Êµ¼ÊÉÏÉúĞ§ÊÇÓÉlru_crawler tocrawl numÖ¸¶¨µÄ
     uint32_t lru_crawler_tocrawl; /* Number of items to crawl per run */
-
-    int hot_lru_pct; /* percentage of slab space for HOT_LRU */
-    int warm_lru_pct; /* percentage of slab space for WARM_LRU */
-    int crawls_persleep; /* Number of LRU crawls to run before sleeping */
-    bool expirezero_does_not_evict; /* exptime == 0 goes into NOEXP_LRU */
 };
 
-extern struct stats stats;
+extern struct stats_t stats;
 extern time_t process_started;
-extern struct settings settings;
+extern struct settings_s settings;
 
 //¸Ãitem²åÈëµ½LRU¶ÓÁĞÁË
 #define ITEM_LINKED 1 //¼ûdo_item_link
@@ -413,13 +416,10 @@ extern struct settings settings;
 #define ITEM_CAS 2
 
 /* temp */
-//¸Ãitem»¹ÔÚslabµÄ¿ÕÏĞ¶ÓÁĞÀïÃæ£¬Ã»ÓĞ·ÖÅä³öÈ¥ ¼ûdo_slabs_free
-#define ITEM_SLABBED 4
+//¸Ãitem»¹ÔÚslabµÄ¿ÕÏĞ¶ÓÁĞÀïÃæ£¬Ã»ÓĞ·ÖÅä³öÈ¥
+#define ITEM_SLABBED 4  //¼ûdo_slabs_free
 //¸Ãitem ²åÈëµ½LRU¶ÓÁĞºó£¬±»workerÏß³Ì·ÃÎÊ¹ı
-/* Item was fetched at least once in its lifetime */
-#define ITEM_FETCHED 8 //µ±¿Í»§¶Ëget¸ÃitemµÄÊ±ºò»áÖÃITEM_FETCHED
-/* Appended on fetch, removed on LRU shuffling */
-#define ITEM_ACTIVE 16 //µ±¿Í»§¶Ëget¸ÃitemµÄÊ±ºò»áÖÃITEM_FETCHED
+#define ITEM_FETCHED 8
 
 /*
 //itemÉ¾³ı»úÖÆ
@@ -440,23 +440,34 @@ typedef struct _stritem {
     rel_time_t      time;       /* least recent access */
 	//¹ıÆÚÊ§Ğ§Ê±¼ä£¬¾ø¶ÔÊ±¼ä Ò»¸öitemÔÚÁ½ÖÖÇé¿öÏÂ»á¹ıÆÚÊ§Ğ§£º1.itemµÄexptimeÊ±¼ä´Áµ½ÁË¡£2.ÓÃ»§Ê¹ÓÃflush_allÃüÁî½«È«²¿item±ä³É¹ıÆÚÊ§Ğ§µÄ
 	rel_time_t      exptime;    /* expire time */
-	//±¾item´æ·ÅµÄÊı¾İµÄ³¤¶È
+	//±¾item´æ·ÅµÄÊı¾İµÄ³¤¶È   nbytesÊÇËãÉÏÁË\r\n×Ö·ûµÄ£¬¼ûdo_item_allocÍâ²ã   ²Î¿¼item_make_headerÖĞµÄ
     int             nbytes;     /* size of data */
+
+    /*
+    ¿ÉÒÔ¿´µ½£¬ÕâÊÇÒòÎª¼õÉÙÒ»¸öitemµÄÒıÓÃÊı¿ÉÄÜÒªÉ¾³ıÕâ¸öitem¡£ÎªÊ²Ã´ÄØ£¿¿¼ÂÇÕâÑùµÄÇé¾°£¬Ïß³ÌAÒòÎªÒª¶ÁÒ»¸öitem¶øÔö¼ÓÁËÕâ¸öitemµÄ
+    ÒıÓÃ¼ÆÊı£¬´ËÊ±Ïß³ÌB½øÀ´ÁË£¬ËüÒªÉ¾³ıÕâ¸öitem¡£Õâ¸öÉ¾³ıÃüÁîÊÇ¿Ï¶¨»áÖ´ĞĞµÄ£¬¶ø²»ÊÇËµÕâ¸öitem±»±ğµÄÏß³ÌÒıÓÃÁË¾Í²»Ö´ĞĞÉ¾³ıÃüÁî¡£
+    µ«ÓÖ¿Ï¶¨²»ÄÜÂíÉÏÉ¾³ı£¬ÒòÎªÏß³ÌA»¹ÔÚÊ¹ÓÃÕâ¸öitem£¬´ËÊ±memcached¾Í²ÉÓÃÑÓ³ÙÉ¾³ıµÄ×ö·¨¡£Ïß³ÌBÖ´ĞĞÉ¾³ıÃüÁîÊ±¼õ¶àÒ»´ÎitemµÄÒıÓÃÊı£¬
+    Ê¹µÃµ±Ïß³ÌAÊÍ·Å×Ô¼º¶ÔitemµÄÒıÓÃºó£¬itemµÄÒıÓÃÊı±ä³É0¡£´ËÊ±item¾Í±»ÊÍ·ÅÁË(¹é»¹¸øslab·ÖÅäÆ÷)¡£
+    */
+    
 	//±¾itemµÄÒıÓÃÊı ÔÚÊ¹ÓÃdo_item_removeº¯ÊıÏòslab¹é»¹itemÊ±£¬»áÏÈ²âÊÔÕâ¸öitemµÄÒıÓÃÊıÊÇ·ñµÈÓÚ0¡£
-	//ÒıÓÃÊı¿ÉÒÔ¼òµ¥Àí½âÎªÊÇ·ñÓĞworkerÏß³ÌÔÚÊ¹ÓÃÕâ¸öitem
-    unsigned short  refcount;  //ÔÚdo_item_linkÖĞÔö¼Ó
+	//ÒıÓÃÊı¿ÉÒÔ¼òµ¥Àí½âÎªÊÇ·ñÓĞworkerÏß³ÌÔÚÊ¹ÓÃÕâ¸öitem   ¼ÇÂ¼Õâ¸öitem±»ÒıÓÃ(±»workerÏß³ÌÕ¼ÓÃ)µÄ×ÜÊı
+	//²Î¿¼http://blog.csdn.net/luotuo44/article/details/42913549
+    unsigned short  refcount;  //ÔÚdo_item_linkÖĞÔö¼Ó  //ĞÂ¿ªÅÌµÄÄ¬ÈÏ³õÖµÎª1
 	//ºó×º³¤¶È£¬  (nkey + *nsuffix + nbytes)ÖĞµÄnsuffix  ²Î¿¼item_make_headerÖĞµÄ
     uint8_t         nsuffix;    /* length of flags-and-length string */
 	//itemµÄÊôĞÔ  ÊÇ·ñÊ¹ÓÃcas£¬settings.use_cas   // itemµÄÈıÖÖflag: ITEM_SLABBED, ITEM_LINKED,ITEM_CAS
     uint8_t         it_flags;   /* ITEM_* above */
     //¸ÃitemÊÇ´ÓÄÄ¸öslabclass»ñÈ¡µÃµ½
     uint8_t         slabs_clsid;/* which slab class we're in */
-	//¼üÖµµÄ³¤¶È 
+	//¼üÖµµÄ³¤¶È Êµ¼ÊÉÏÕæÊµÓÃµ½µÄÄÚ´æÊÇnkey+1,¼ûdo_item_alloc  ²Î¿¼item_make_headerÖĞµÄ
     uint8_t         nkey;       /* key length, w/terminating null and padding */
+    
     /* this odd type prevents type-punning issues when we do
      * the little shuffle to save space when not using CAS. */
     union {
         //ITEM_set_cas  Ö»ÓĞÔÚ¿ªÆôsettings.use_cas²ÅÓĞÓÃ
+        //ITEM_set_cas   get_cas_id  ITEM_get_cas  Ã¿´Î¶ÁÈ¡ÍêÊı¾İ²¿·Öºó£¬´æ´¢µ½itemÖĞºó£¬storedµÄÊ±ºò¶¼»áµ÷ÓÃdo_store_item×ÔÔö
         uint64_t cas; //²Î¿¼process_update_commandÖĞµÄreq_cas_id,Êµ¼ÊÊÇ´Ó¿Í»§¶ËµÄsetµÈÃüÁîÖĞ»ñÈ¡µ½µÄ
         char end;
     } data[];
@@ -466,8 +477,6 @@ typedef struct _stritem {
     /* then " flags length\r\n" (no terminating null) */
     /* then data with terminating \r\n (no terminating null; it's binary!) */
 } item;
-
-
 
 //Õâ¸ö½á¹¹ÌåºÍitem½á¹¹Ìå³¤µÃºÜÏñ,ÊÇÎ±item½á¹¹Ìå£¬ÓÃÓÚLRUÅÀ³æ 
 typedef struct { //¸³ÖµºÍ³õÊ¼»¯²Î¿¼lru_crawler_crawl
@@ -501,7 +510,7 @@ typedef struct {
     //dispatch_conn_newÖ÷Ïß³Ì½ÓÊÕaccept¿Í»§¶Ë·µ»ØĞÂfdºó´´½¨Ò»¸öCQ_ITEM·ÅÈë¶ÓÁĞ£¬¹¤×÷×ÓÏß³Ìthread_libevent_process´Ó¶ÓÁĞÈ¡³ö´¦Àí
     struct conn_queue *new_conn_queue; /* queue of new connections to handle */
     cache_t *suffix_cache;      /* suffix cache */
-
+    uint8_t item_lock_type;     /* use fine-grained or global item lock */
 } LIBEVENT_THREAD; //static LIBEVENT_THREAD *threads;
 
 typedef struct {
@@ -512,8 +521,8 @@ typedef struct {
 /**
  * The structure representing a connection into memcached.
  */
-typedef struct conn conn;
-struct conn {
+typedef struct conn_t conn;
+struct conn_t {
 	//¸Ãconn¶ÔÓ¦µÄsocket fd
     int    sfd;
     sasl_conn_t *sasl_conn;
@@ -540,20 +549,18 @@ struct conn {
 	//ÓĞĞ§Êı¾İµÄ³¤¶È   Î´½âÎöµÄÃüÁîµÄ³¤¶È¡£
     int    rbytes;  /** how much data, starting from rcur, do we have unparsed */
 
-
     char   *wbuf;
     char   *wcurr;
     int    wsize;
     int    wbytes;
     /** which state to go into after finishing current write */
-    enum conn_states  write_and_go;
+    enum conn_states  write_and_go;//Ğ´ÍêºóµÄÏÂÒ»¸ö×´Ì¬  
     void   *write_and_free; /** free this memory after finishing writing */
 
 	//Êı¾İÖ±Í¨³µ   Êı¾İ²¿·Ö¸³Öµ¹ı³Ì£¬¸³Öµ¼ûprocess_update_commandºÍdrive_machine
     char   *ritem;  /** when we read in an item's value, it goes here */
     //×î¿ªÊ¼rlbytesÎªÊı¾İ²¿·Ö×Ü³¤¶È£¬µ±°ÑÊı¾İ²¿·ÖÌî³äºÃºó£¬ÆäÖµ¾Í¸ÕºÃÎª0
     int    rlbytes; //Êı¾İ²¿·Ö»¹²î¶àÉÙ ¸³Öµ¼ûprocess_update_commandºÍdrive_machine
-
 
     /* data for the nread state */
 
@@ -568,6 +575,7 @@ struct conn {
 
     /* data for the swallow state */
     int    sbytes;    /* how many bytes to swallow */
+
     /* data for the mwrite state */
 	//iovecÊı×éÖ¸Õë  conn_new´´½¨¿Õ¼ä
     struct iovec *iov;
@@ -657,11 +665,7 @@ struct slab_rebalance { //´æ´¢ÔÚslab_rebal   ¸³Öµ¿ÉÒÔ²Î¿¼slab_rebalance_start  Ö
     //½øĞĞautomoveµÄÔ´slabclass[]idºÍÄ¿µÄslabclass[]id
     int s_clsid;//Ô´slab classµÄÏÂ±êË÷Òı  
     int d_clsid;//Ä¿±êslab classµÄÏÂ±êË÷Òı  
-
-    uint32_t busy_items;//ÊÇ·ñworkerÏß³ÌÔÚÒıÓÃÄ³¸öitem,¼ÇÂ¼ÒıÓÃÊı   slabÇ¨ÒÆ¹ı³ÌÖĞÕıÔÚ±»ÆäËûÏß³Ì·ÃÎÊµÄtrunkÊı£¬¸³Öµ¼ûslab_rebalance_move
-    uint32_t rescues;
-    uint32_t evictions_nomem;
-    uint32_t inline_reclaim;
+    int busy_items;//ÊÇ·ñworkerÏß³ÌÔÚÒıÓÃÄ³¸öitem,¼ÇÂ¼ÒıÓÃÊı   slabÇ¨ÒÆ¹ı³ÌÖĞÕıÔÚ±»ÆäËûÏß³Ì·ÃÎÊµÄtrunkÊı£¬¸³Öµ¼ûslab_rebalance_move
     uint8_t done;//ÊÇ·ñÍê³ÉÁËÄÚ´æÒ³ÒÆ¶¯  
 };
 
@@ -679,7 +683,12 @@ enum store_item_type do_store_item(item *item, int comm, conn* c, const uint32_t
 conn *conn_new(const int sfd, const enum conn_states init_state, const int event_flags, const int read_buffer_size, enum network_transport transport, struct event_base *base);
 extern int daemonize(int nochdir, int noclose);
 
-#define mutex_lock(x) pthread_mutex_lock(x)
+static inline int mutex_lock(pthread_mutex_t *mutex)
+{
+    while (pthread_mutex_trylock(mutex));
+    return 0;
+}
+
 #define mutex_unlock(x) pthread_mutex_unlock(x)
 
 #include "stats.h"
@@ -697,7 +706,7 @@ extern int daemonize(int nochdir, int noclose);
  * also #define-d to directly call the underlying code in singlethreaded mode.
  */
 
-void memcached_thread_init(int nthreads, struct event_base *main_base);
+void thread_init(int nthreads, struct event_base *main_base);
 int  dispatch_event_add(int thread, conn *c);
 void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags, int read_buffer_size, enum network_transport transport);
 
@@ -711,19 +720,26 @@ conn *conn_from_freelist(void);
 bool  conn_add_to_freelist(conn *c);
 int   is_listen_thread(void);
 item *item_alloc(char *key, size_t nkey, int flags, rel_time_t exptime, int nbytes);
+char *item_cachedump(const unsigned int slabs_clsid, const unsigned int limit, unsigned int *bytes);
+void  item_flush_expired(void);
 item *item_get(const char *key, const size_t nkey);
 item *item_touch(const char *key, const size_t nkey, uint32_t exptime);
 int   item_link(item *it);
 void  item_remove(item *it);
 int   item_replace(item *it, item *new_it, const uint32_t hv);
+void  item_stats(ADD_STAT add_stats, void *c);
+void  item_stats_totals(ADD_STAT add_stats, void *c);
+void  item_stats_sizes(ADD_STAT add_stats, void *c);
 void  item_unlink(item *it);
 void  item_update(item *it);
 
+void item_lock_global(void);
+void item_unlock_global(void);
 void item_lock(uint32_t hv);
 void *item_trylock(uint32_t hv);
 void item_trylock_unlock(void *arg);
 void item_unlock(uint32_t hv);
-void pause_threads(enum pause_thread_types type);
+void switch_item_lock_type(enum item_lock_types type);
 unsigned short refcount_incr(unsigned short *refcount);
 unsigned short refcount_decr(unsigned short *refcount);
 void STATS_LOCK(void);

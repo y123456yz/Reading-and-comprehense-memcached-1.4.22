@@ -11,7 +11,6 @@ BEGIN {
     push(@exempted, glob("doc/xml2rfc/*.xsl"));
     push(@exempted, glob("m4/*backport*m4"));
     push(@exempted, glob("*.orig"));
-    push(@exempted, glob(".*.swp"));
     my %exempted_hash = map { $_ => 1 } @exempted;
 
     my @stuff = split /\0/, `git ls-files -z -c -m -o --exclude-standard`;

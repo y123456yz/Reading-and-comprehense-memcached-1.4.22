@@ -12,8 +12,8 @@ int main(int argc, char **argv) {
     display("Thread stats",
             sizeof(struct thread_stats)
             - (200 * sizeof(struct slab_stats)));
-    display("Global stats", sizeof(struct stats));
-    display("Settings", sizeof(struct settings));
+    display("Global stats", sizeof(struct stats_t));
+    display("Settings", sizeof(struct settings_s));
     display("Item (no cas)", sizeof(item));
     display("Item (cas)", sizeof(item) + sizeof(uint64_t));
     display("Libevent thread",

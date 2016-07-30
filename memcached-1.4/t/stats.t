@@ -1,7 +1,7 @@
 #!/usr/bin/perl
 
 use strict;
-use Test::More tests => 98;
+use Test::More tests => 97;
 use FindBin qw($Bin);
 use lib "$Bin/lib";
 use MemcachedTest;
@@ -48,7 +48,6 @@ my $sock = $server->sock;
 ## STAT limit_maxbytes 67108864
 ## STAT accepting_conns 1
 ## STAT listen_disabled_num 0
-## STAT time_in_listen_disabled_us 0
 ## STAT threads 4
 ## STAT conn_yields 0
 ## STAT hash_power_level 16
@@ -64,19 +63,18 @@ my $sock = $server->sock;
 ## STAT reclaimed 0
 ## STAT crawler_reclaimed 0
 ## STAT lrutail_reflocked 0
-## see doc/protocol.txt for others
 # note that auth stats are tested in auth specfic tests
 
 
 my $stats = mem_stats($sock);
 
 # Test number of keys
-is(scalar(keys(%$stats)), 53, "53 stats values");
+is(scalar(keys(%$stats)), 51, "51 stats values");
 
 # Test initial state
 foreach my $key (qw(curr_items total_items bytes cmd_get cmd_set get_hits evictions get_misses
                  bytes_written delete_hits delete_misses incr_hits incr_misses decr_hits
-                 decr_misses listen_disabled_num lrutail_reflocked time_in_listen_disabled_us)) {
+                 decr_misses listen_disabled_num lrutail_reflocked)) {
     is($stats->{$key}, 0, "initial $key is zero");
 }
 is($stats->{accepting_conns}, 1, "initial accepting_conns is one");

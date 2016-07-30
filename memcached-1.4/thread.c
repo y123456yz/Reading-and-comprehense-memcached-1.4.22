@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <errno.h>
 #include <stdlib.h>
+#include <errno.h>
 #include <string.h>
 #include <pthread.h>
 
@@ -36,8 +37,8 @@ struct conn_queue {
     pthread_mutex_t lock; //一个队列就对应一个锁
 };
 
-/* Locks for cache LRU operations */
-pthread_mutex_t lru_locks[POWER_LARGEST];
+/* Lock for cache operations (item_*, assoc_*) */
+pthread_mutex_t cache_lock;
 
 /* Connection lock around accepting new connections */
 pthread_mutex_t conn_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -47,21 +48,25 @@ pthread_mutex_t atomics_mutex = PTHREAD_MUTEX_INITIALIZER;
 #endif
 
 /* Lock for global stats */
-static pthread_mutex_t stats_lock = PTHREAD_MUTEX_INITIALIZER;
-
-/* Lock to cause worker threads to hang up after being woken */
-static pthread_mutex_t worker_hang_lock;
+static pthread_mutex_t stats_lock;
 
 /* Free list of CQ_ITEM structs */
 static CQ_ITEM *cqi_freelist;
 static pthread_mutex_t cqi_freelist_lock;
 
-static pthread_mutex_t *item_locks;
+//可以参考http://blog.csdn.net/luotuo44/article/details/42913549
+static pthread_mutex_t *item_locks; //初始化和赋值见thread_init
 /* size of the item lock hash table */
 static uint32_t item_lock_count;
-unsigned int item_lock_hashpower;
+
+
+static unsigned int item_lock_hashpower;
 #define hashsize(n) ((unsigned long int)1<<(n))
 #define hashmask(n) (hashsize(n)-1)
+/* this lock is temporarily engaged during a hash table expansion */
+static pthread_mutex_t item_global_lock;
+/* thread-specific variable for deeply finding the item lock type */
+static pthread_key_t item_lock_type_key; ////线程私有数据的键值    不同线程的修改互不干扰
 
 static LIBEVENT_DISPATCHER_THREAD dispatcher_thread;
 
@@ -111,18 +116,34 @@ unsigned short refcount_decr(unsigned short *refcount) {
 #endif
 }
 
-/* item_lock() must be held for an item before any modifications to either its
- * associated hash bucket, or the structure itself.
- * LRU modifications must hold the item lock, and the LRU lock.
- * LRU's accessing items must item_trylock() before modifying an item.
- * Items accessable from an LRU must not be freed or modified
- * without first locking and removing from the LRU.
- */
-
-void item_lock(uint32_t hv) {
-    mutex_lock(&item_locks[hv & hashmask(item_lock_hashpower)]);
+/* Convenience functions for calling *only* when in ITEM_LOCK_GLOBAL mode */
+void item_lock_global(void) {
+    mutex_lock(&item_global_lock);
 }
 
+void item_unlock_global(void) {
+    mutex_unlock(&item_global_lock);
+}
+
+void item_lock(uint32_t hv) {
+    uint8_t *lock_type = pthread_getspecific(item_lock_type_key); //获取线程私有变量  
+    //likely这个宏定义用于代码指令优化  
+    //likely(*lock_type == ITEM_LOCK_GRANULAR)用来告诉编译器  
+    //*lock_type等于ITEM_LOCK_GRANULAR的可能性很大  
+    if (likely(*lock_type == ITEM_LOCK_GRANULAR)) {
+        mutex_lock(&item_locks[hv & hashmask(item_lock_hashpower)]); //对某些桶的item加锁  
+    } else {
+        mutex_lock(&item_global_lock);//对所有item加锁  
+    }
+}
+
+/* Special case. When ITEM_LOCK_GLOBAL mode is enabled, this should become a
+ * no-op, as it's only called from within the item lock if necessary.
+ * However, we can't mix a no-op and threads which are still synchronizing to
+ * GLOBAL. So instead we just always try to lock. When in GLOBAL mode this
+ * turns into an effective no-op. Threads re-synchronize after the power level
+ * switch so it should stay safe.
+ */
 void *item_trylock(uint32_t hv) {
     pthread_mutex_t *lock = &item_locks[hv & hashmask(item_lock_hashpower)];
     if (pthread_mutex_trylock(lock) == 0) {
@@ -136,7 +157,12 @@ void item_trylock_unlock(void *lock) {
 }
 
 void item_unlock(uint32_t hv) {
-    mutex_unlock(&item_locks[hv & hashmask(item_lock_hashpower)]);
+    uint8_t *lock_type = pthread_getspecific(item_lock_type_key);
+    if (likely(*lock_type == ITEM_LOCK_GRANULAR)) {
+        mutex_unlock(&item_locks[hv & hashmask(item_lock_hashpower)]);
+    } else {
+        mutex_unlock(&item_global_lock);
+    }
 }
 
 /*
@@ -155,43 +181,38 @@ static void register_thread_initialized(void) {
     init_count++;
     pthread_cond_signal(&init_cond);
     pthread_mutex_unlock(&init_lock);
-    /* Force worker threads to pile up if someone wants us to */
-    pthread_mutex_lock(&worker_hang_lock);
-    pthread_mutex_unlock(&worker_hang_lock);
 }
+
+/*
+    迁移线程为什么要这么迂回曲折地切换workers线程的锁类型呢？直接修改所有线程的LIBEVENT_THREAD结构的item_lock_type
+ 成员变量不就行了吗？
+    这主要是因为迁移线程不知道worker线程此刻在干些什么。如果worker线程正在访问item，并抢占了段级别锁。此时你把worker
+ 线程的锁切换到全局锁，等worker线程解锁的时候就会解全局锁(参考前面的item_lock和item_unlock代码)，这样程序就崩溃了。
+ 所以不能迁移线程去切换，只能迁移线程通知worker线程，然后worker线程自己去切换。当然是要worker线程忙完了手头上的事情
+ 后，才会去修改切换的。所以迁移线程在通知完所有的worker线程后，会调用wait_for_thread_registration函数休眠等待所有的
+ worker线程都切换到指定的锁类型后才醒来。
+*/
 
 //工作子线程读管道有数据到来，thread_libevent_process从读管道读取到信息  
 //对应的主线程写管道在dispatch_conn_new或者switch_item_lock_type
-void pause_threads(enum pause_thread_types type) {
+
+//哈希表迁移线程会在assoc.c文件中的assoc_maintenance_thread函数调用switch_item_lock_type函数，让所有的
+//workers线程都切换到段级别锁或者全局级别锁
+void switch_item_lock_type(enum item_lock_types type) { //函数thread_libevent_process接收l 或者g信息
     char buf[1];
     int i;
 
-    buf[0] = 0;
     switch (type) {
-        case PAUSE_ALL_THREADS:
-            slabs_rebalancer_pause();
-            lru_crawler_pause();
-            lru_maintainer_pause();
-        case PAUSE_WORKER_THREADS:
-            buf[0] = 'p';
-            pthread_mutex_lock(&worker_hang_lock);
+        case ITEM_LOCK_GRANULAR:
+            buf[0] = 'l';//用l表示ITEM_LOCK_GRANULAR 段级别锁  
             break;
-        case RESUME_ALL_THREADS:
-            slabs_rebalancer_resume();
-            lru_crawler_resume();
-            lru_maintainer_resume();
-        case RESUME_WORKER_THREADS:
-            pthread_mutex_unlock(&worker_hang_lock);
+        case ITEM_LOCK_GLOBAL:
+            buf[0] = 'g';//用g表示ITEM_LOCK_GLOBAL 全局级别锁  
             break;
-        default:
+        default: //通过向worker监听的管道写入一个字符通知worker线程  
             fprintf(stderr, "Unknown lock type: %d\n", type);
             assert(1 == 0);
             break;
-    }
-
-    /* Only send a message if we have one. */
-    if (buf[0] == 0) {
-        return;
     }
 
     pthread_mutex_lock(&init_lock);
@@ -202,6 +223,7 @@ void pause_threads(enum pause_thread_types type) {
             /* TODO: This is a fatal problem. Can it ever happen temporarily? */
         }
     }
+    //等待所有的workers线程都把锁切换到type指明的锁类型  
     wait_for_thread_registration(settings.num_threads);
     pthread_mutex_unlock(&init_lock);
 }
@@ -320,12 +342,13 @@ static void cqi_free(CQ_ITEM *item) {
  * Creates a worker thread.
  */
 static void create_worker(void *(*func)(void *), void *arg) {
+    pthread_t       thread;
     pthread_attr_t  attr;
     int             ret;
 
     pthread_attr_init(&attr);
 
-    if ((ret = pthread_create(&((LIBEVENT_THREAD*)arg)->thread_id, &attr, func, arg)) != 0) {
+    if ((ret = pthread_create(&thread, &attr, func, arg)) != 0) {
         fprintf(stderr, "Can't create thread: %s\n",
                 strerror(ret));
         exit(1);
@@ -359,7 +382,6 @@ void accept_new_conns(const bool do_accept) {
 
  * Set up a thread's information.
  */
-
 static void setup_thread(LIBEVENT_THREAD *me) {
 	//新建一个event_base
     me->base = event_init();
@@ -406,9 +428,19 @@ static void setup_thread(LIBEVENT_THREAD *me) {
 static void *worker_libevent(void *arg) {
     LIBEVENT_THREAD *me = arg;
 
-    /* Any per-thread setup can happen here; memcached_thread_init() will block until
+    /* Any per-thread setup can happen here; thread_init() will block until
      * all threads have finished initializing.
      */
+
+    /* set an indexable thread-specific memory item for the lock type.
+     * this could be unnecessary if we pass the conn *c struct through
+     * all item_lock calls...
+     */
+    me->item_lock_type = ITEM_LOCK_GRANULAR;//初试状态使用段级别锁  
+    //为workers线程设置线程私有数据  
+    //因为所有的workers线程都会调用这个函数，所以所有的workers线程都设置了相同键值的  
+    //线程私有数据  
+    pthread_setspecific(item_lock_type_key, &me->item_lock_type);
 
     register_thread_initialized();
 
@@ -420,7 +452,7 @@ static void *worker_libevent(void *arg) {
 /*
  * Processes an incoming "handle a new connection" item. This is called when
  * input arrives on the libevent wakeup pipe.
- */
+ */ 
 //thread_libevent_process这个管道事件回调使用于主线程接受到客户端连接后通知工作子线程重新创建一个新的
 //conn，在conn_new重新设置网络事件回调函数conn_new->event_handler
  
@@ -463,21 +495,28 @@ static void thread_libevent_process(int fd, short which, void *arg) {
     }
         break;
     //switch_item_lock_type触发走到这里
-    /* we were told to pause and report in */
-    case 'p':
+    /* we were told to flip the lock type and report in */
+    case 'l': //参考switch_item_lock_type //切换item到段级别  
+    //唤醒睡眠在init_cond条件变量上的迁移线程  
+    me->item_lock_type = ITEM_LOCK_GRANULAR;
+    register_thread_initialized();
+        break;
+    case 'g'://切换item锁到全局级别  
+    me->item_lock_type = ITEM_LOCK_GLOBAL;
     register_thread_initialized();
         break;
     }
 }
 
 /* Which thread we assigned a connection to most recently. */
-static int last_thread = -1;
+static int last_thread = -1; 
 
 /*
  * Dispatches a new connection to another thread. This is only ever called
  * from the main thread, either during initialization (for UDP) or because
  * of an incoming connection.
  */
+
 /*
 每个线程都是一个单独的libevent实例,主线程eventloop负责处理监听fd，监听客户端的建立连接请求，以及
 accept连接，将已建立的连接round robin到各个worker。workers线程负责处理已经建立好的连接的读写等事件
@@ -501,7 +540,7 @@ void dispatch_conn_new(int sfd, enum conn_states init_state, int event_flags,
 	//轮询的方式选定一个worker线程
     int tid = (last_thread + 1) % settings.num_threads;
 
-    LIBEVENT_THREAD *thread = threads + tid;
+    LIBEVENT_THREAD *thread = threads + tid; //轮询选择由那个工作现场来处理
 
     last_thread = tid;
 
@@ -595,9 +634,10 @@ void item_remove(item *item) {
  * Replaces one item with another in the hashtable.
  * Unprotected by a mutex lock since the core server does not require
  * it to be thread-safe.
- */
-int item_replace(item *old_it, item *new_it, const uint32_t hv) {
-    return do_item_replace(old_it, new_it, hv);
+ *///把旧的删除，插入新的。replace命令会调用本函数.  
+//无论旧item是否有其他worker线程在引用，都是直接将之从哈希表和LRU队列中删除  
+int item_replace(item *old_it, item *new_it, const uint32_t hv) { //这里面会unlink old_it,然后link new_it
+    return do_item_replace(old_it, new_it, hv); //注意这里面old_it->refcount会减1，new_it会增1
 }
 
 /*
@@ -625,7 +665,7 @@ void item_update(item *item) {
 
 /*
  * Does arithmetic on a numeric item value.
- */
+ */ //inc和dec命令处理
 enum delta_result_type add_delta(conn *c, const char *key,
                                  const size_t nkey, int incr,
                                  const int64_t delta, char *buf,
@@ -643,7 +683,7 @@ enum delta_result_type add_delta(conn *c, const char *key,
 /*
  * Stores an item in the cache (high level, obeys set/add/replace semantics)
  */
-enum store_item_type store_item(item *item, int comm, conn* c) {
+enum store_item_type store_item(item *item, int comm, conn* c) { //注意该函数外层在该函数执行完后一般会调用一次item_remove
     enum store_item_type ret;
     uint32_t hv;
 
@@ -652,6 +692,99 @@ enum store_item_type store_item(item *item, int comm, conn* c) {
     ret = do_store_item(item, comm, c, hv);
     item_unlock(hv);
     return ret;
+}
+
+/*
+ * Flushes expired items after a flush_all call
+ */
+void item_flush_expired() {
+    mutex_lock(&cache_lock);
+    do_item_flush_expired();
+    mutex_unlock(&cache_lock);
+}
+
+/*
+ stats cachedump 4 100
+ITEM foo_rand112722700000 [100 b; 1462575443 s]
+ITEM foo_rand841447400000 [100 b; 1462575443 s]
+ITEM foo_rand708137200000 [100 b; 1462575443 s]
+ITEM foo_rand435945600000 [100 b; 1462575443 s]
+ITEM foo_rand708670400000 [100 b; 1462575443 s]
+ITEM foo_rand606717400000 [100 b; 1462575443 s]
+ITEM foo_rand000000000000 [100 b; 1462575443 s]
+ITEM foo_rand718332000000 [100 b; 1462575443 s]
+ITEM foo_rand264939300000 [100 b; 1462575443 s]
+ITEM foo_rand966316900000 [100 b; 1462575443 s]
+END
+stats cachedump 5 100
+END
+stats cachedump 4 1
+ITEM foo_rand112722700000 [100 b; 1462575443 s]
+END
+stats cachedump 4 20
+ITEM foo_rand112722700000 [100 b; 1462575443 s]
+ITEM foo_rand841447400000 [100 b; 1462575443 s]
+ITEM foo_rand708137200000 [100 b; 1462575443 s]
+ITEM foo_rand435945600000 [100 b; 1462575443 s]
+ITEM foo_rand708670400000 [100 b; 1462575443 s]
+ITEM foo_rand606717400000 [100 b; 1462575443 s]
+ITEM foo_rand000000000000 [100 b; 1462575443 s]
+ITEM foo_rand718332000000 [100 b; 1462575443 s]
+ITEM foo_rand264939300000 [100 b; 1462575443 s]
+ITEM foo_rand966316900000 [100 b; 1462575443 s]
+END
+
+ERROR
+set yang 0 0 100 xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+STORED
+stats cachedump 4 100
+ITEM yang [100 b; 1462575443 s]
+ITEM foo_rand112722700000 [100 b; 1462575443 s]
+ITEM foo_rand841447400000 [100 b; 1462575443 s]
+ITEM foo_rand708137200000 [100 b; 1462575443 s]
+ITEM foo_rand435945600000 [100 b; 1462575443 s]
+ITEM foo_rand708670400000 [100 b; 1462575443 s]
+ITEM foo_rand606717400000 [100 b; 1462575443 s]
+ITEM foo_rand000000000000 [100 b; 1462575443 s]
+ITEM foo_rand718332000000 [100 b; 1462575443 s]
+ITEM foo_rand264939300000 [100 b; 1462575443 s]
+ITEM foo_rand966316900000 [100 b; 1462575443 s]
+*/
+/*
+ * Dumps part of the cache
+ */
+char *item_cachedump(unsigned int slabs_clsid, unsigned int limit, unsigned int *bytes) {
+    char *ret;
+
+    mutex_lock(&cache_lock);
+    ret = do_item_cachedump(slabs_clsid, limit, bytes);
+    mutex_unlock(&cache_lock);
+    return ret;
+}
+
+/*
+ * Dumps statistics about slab classes
+ */
+void  item_stats(ADD_STAT add_stats, void *c) {
+    mutex_lock(&cache_lock);
+    do_item_stats(add_stats, c);
+    mutex_unlock(&cache_lock);
+}
+
+void  item_stats_totals(ADD_STAT add_stats, void *c) {
+    mutex_lock(&cache_lock);
+    do_item_stats_totals(add_stats, c);
+    mutex_unlock(&cache_lock);
+}
+
+/*
+ * Dumps a list of objects of each size in 32-byte increments
+ */
+void  item_stats_sizes(ADD_STAT add_stats, void *c) {
+    mutex_lock(&cache_lock);
+    do_item_stats_sizes(add_stats, c);
+    mutex_unlock(&cache_lock);
 }
 
 /******************************* GLOBAL STATS ******************************/
@@ -779,14 +912,13 @@ void slab_stats_aggregate(struct thread_stats *stats, struct slab_stats *out) {
  */
  //参数nthread是woker线程的数量。main_base则是主线程的event_base
  //主线程在main函数调用本函数，创建nthreads个worker线程
-void memcached_thread_init(int nthreads, struct event_base *main_base) {
+void thread_init(int nthreads, struct event_base *main_base) {
     int         i;
     int         power;
 
 	//申请一个CQ_ITEM时需要加锁
-        pthread_mutex_init(&lru_locks[i], NULL);
-    }
-    pthread_mutex_init(&worker_hang_lock, NULL);
+    pthread_mutex_init(&cache_lock, NULL);
+    pthread_mutex_init(&stats_lock, NULL);
 
     pthread_mutex_init(&init_lock, NULL);
     pthread_cond_init(&init_cond, NULL);
@@ -806,16 +938,10 @@ void memcached_thread_init(int nthreads, struct event_base *main_base) {
         power = 13;
     }
 
-    if (power >= hashpower) {
-        fprintf(stderr, "Hash table power size (%d) cannot be equal to or less than item lock table (%d)\n", hashpower, power);
-        fprintf(stderr, "Item lock table grows with `-t N` (worker threadcount)\n");
-        fprintf(stderr, "Hash table grows with `-o hashpower=N` \n");
-        exit(1);
-    }
-
     item_lock_count = hashsize(power);
     item_lock_hashpower = power;
 
+    //哈希表中段级别的锁。并不是一个桶就对应有一个锁。而是多个桶共用一个锁  
     item_locks = calloc(item_lock_count, sizeof(pthread_mutex_t));
     if (! item_locks) {
         perror("Can't allocate item locks");
@@ -824,6 +950,8 @@ void memcached_thread_init(int nthreads, struct event_base *main_base) {
     for (i = 0; i < item_lock_count; i++) {
         pthread_mutex_init(&item_locks[i], NULL);
     }
+    pthread_key_create(&item_lock_type_key, NULL);
+    pthread_mutex_init(&item_global_lock, NULL);
 
 	//申请具有nthreads个元素的LIBEVENT_THREAD数据
     threads = calloc(nthreads, sizeof(LIBEVENT_THREAD));
@@ -859,7 +987,7 @@ void memcached_thread_init(int nthreads, struct event_base *main_base) {
 		//创建线程，线程函数为worker_libevent，线程参数为&thread[i]
         create_worker(worker_libevent, &threads[i]);
     }
-
+    
     /* Wait for all the threads to set themselves up before returning. */
     pthread_mutex_lock(&init_lock);
     wait_for_thread_registration(nthreads); //主线程阻塞等待事件到来

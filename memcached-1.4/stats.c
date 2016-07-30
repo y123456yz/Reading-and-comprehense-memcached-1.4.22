@@ -126,7 +126,7 @@ static PREFIX_STATS *stats_prefix_find(const char *key, const size_t nkey) {
     num_prefixes++;
     total_prefix_size += length;
 
-    return pfs;
+    return pfs; 
 }
 
 /*
@@ -377,7 +377,7 @@ static void run_test(char *what, void (*func)(void)) {
 void mt_stats_lock() { }
 void mt_stats_unlock() { }
 
-main(int argc, char **argv) {
+main11(int argc, char **argv) {
     stats_prefix_init();
     settings.prefix_delimiter = ':';
     run_test("stats_prefix_find", test_prefix_find);
