@@ -449,7 +449,7 @@ Copyright (C) 2010 Free Software Foundation, Inc.
 This config.status script is free software; the Free Software Foundation
 gives unlimited permission to copy, distribute and modify it."
 
-ac_pwd='/root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4'
+ac_pwd='/root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4'
 srcdir='.'
 INSTALL='/usr/bin/install -c'
 MKDIR_P='/bin/mkdir -p'
@@ -672,8 +672,7 @@ S["CFLAGS"]="-g -O2 -pthread -pthread -Wall -Werror -pedantic -Wmissing-prototyp
 S["CC"]="gcc -std=gnu99"
 S["am__untar"]="${AMTAR} xf -"
 S["am__tar"]="${AMTAR} chof - \"$$tardir\""
-S["AMTAR"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4"\
-"/missing --run tar"
+S["AMTAR"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run tar"
 S["am__leading_dot"]="."
 S["SET_MAKE"]=""
 S["AWK"]="gawk"
@@ -681,18 +680,12 @@ S["mkdir_p"]="/bin/mkdir -p"
 S["MKDIR_P"]="/bin/mkdir -p"
 S["INSTALL_STRIP_PROGRAM"]="$(install_sh) -c -s"
 S["STRIP"]=""
-S["install_sh"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4"\
-"/install-sh"
-S["MAKEINFO"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4"\
-"/missing --run makeinfo"
-S["AUTOHEADER"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4"\
-"/missing --run autoheader"
-S["AUTOMAKE"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4"\
-"/missing --run automake-1.11"
-S["AUTOCONF"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4"\
-"/missing --run autoconf"
-S["ACLOCAL"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/test/Reading-and-comprehense-memcached-1.4.22/memcached-1.4"\
-"/missing --run aclocal-1.11"
+S["install_sh"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/install-sh"
+S["MAKEINFO"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run makeinfo"
+S["AUTOHEADER"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run autoheader"
+S["AUTOMAKE"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run automake-1.11"
+S["AUTOCONF"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run autoconf"
+S["ACLOCAL"]="${SHELL} /root/yangyazhou/git_yyz/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run aclocal-1.11"
 S["VERSION"]="1.4.21"
 S["PACKAGE"]="memcached"
 S["CYGPATH_W"]="echo"

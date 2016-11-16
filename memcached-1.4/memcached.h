@@ -307,6 +307,7 @@ struct stats_t { //struct stats_t stats;
  */
 struct settings_s {
     size_t maxbytes; //memcached能够使用的最大内存
+    //注意这个包括memcache内部使用的fd，实际上提供给客户端建链的fd要少于这个100多，例如配置-c 1024，实际上最多接收900多个连接
     int maxconns;//最多允许多少个客户端同时在线。不同于setting.backlog
     int port; //监听端口，默认11211
     int udpport; //memcached监听的udp端口

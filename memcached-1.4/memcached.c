@@ -148,6 +148,8 @@ static void maxconns_handler(const int fd, const short which, void *arg) {
     }
 }
 
+//如果设置的过期时间为30天以上，例如为31天的秒时间 31*86400，如果该值小于进程启动时候的时间戳，则直接把过期时间设置为1s
+//如果大于程序启动时间，则过期时间位相对时间的秒数差值
 #define REALTIME_MAXDELTA 60*60*24*30
 
 /*
@@ -160,7 +162,7 @@ static rel_time_t realtime(const time_t exptime) {
 
     if (exptime == 0) return 0; /* 0 means never expire */
 
-    if (exptime > REALTIME_MAXDELTA) {
+    if (exptime > REALTIME_MAXDELTA) { //如果设置的过期时间为30天以上，例如为31天的秒时间 31*86400，如果该值小于进程启动时候的时间戳，则直接把过期时间设置为1s
         /* if item expiration is at/before the server started, give it an
            expiration time of 1 second after the server started.
            (because 0 means don't expire).  without this, we'd
@@ -169,7 +171,7 @@ static rel_time_t realtime(const time_t exptime) {
            really expiring never */
         if (exptime <= process_started)
             return (rel_time_t)1;
-        return (rel_time_t)(exptime - process_started);
+        return (rel_time_t)(exptime - process_started); //否则转换为相对时间秒数比较
     } else {
         return (rel_time_t)(exptime + current_time);
     }
@@ -2669,6 +2671,7 @@ inline static void process_stats_detail(conn *c, const char *command) {
     else if (strcmp(command, "dump") == 0) {
         int len;
         char *stats = stats_prefix_dump(&len);
+        printf("yang test dump, len:%d\r\n", len);
         write_and_free(c, stats, len);
     }
     else {
@@ -5512,7 +5515,7 @@ int main (int argc, char **argv) {
             break;
 		//最多允许多少个客户端同时在线，该选项和后面的b选项不同。默认为1024个。该选项参数赋值给settings.maxconns	
         case 'c':
-            settings.maxconns = atoi(optarg);
+            settings.maxconns = atoi(optarg); //注意这个包括memcache内部使用的fd，实际上提供给客户端建链的fd要少于这个100多，例如配置-c 1024，实际上最多接收900多个连接
             break;
 		//显示帮助信息	
         case 'h':

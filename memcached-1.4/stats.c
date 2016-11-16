@@ -177,7 +177,7 @@ void stats_prefix_record_set(const char *key, const size_t nkey) {//¼ÇÂ¼Ä³key±»É
 /*
  * Returns stats in textual form suitable for writing to a client.
  */
-/*@null@*/ //Êä³öËùÓĞĞÅÏ¢
+/*@null@*/ //Êä³öËùÓĞĞÅÏ¢  
 char *stats_prefix_dump(int *length) {
     const char *format = "PREFIX %s get %llu hit %llu set %llu del %llu\r\n";
     PREFIX_STATS *pfs;
