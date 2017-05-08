@@ -4,7 +4,7 @@ testapp.o: testapp.c /usr/include/pthread.h /usr/include/features.h \
  /usr/include/endian.h /usr/include/bits/endian.h \
  /usr/include/bits/byteswap.h /usr/include/sched.h \
  /usr/include/bits/types.h /usr/include/bits/typesizes.h \
- /usr/lib/gcc/x86_64-redhat-linux/4.4.7/include/stddef.h \
+ /usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stddef.h \
  /usr/include/time.h /usr/include/bits/sched.h /usr/include/bits/time.h \
  /usr/include/xlocale.h /usr/include/bits/pthreadtypes.h \
  /usr/include/bits/setjmp.h /usr/include/sys/types.h \
@@ -20,12 +20,13 @@ testapp.o: testapp.c /usr/include/pthread.h /usr/include/features.h \
  /usr/include/sys/ucontext.h /usr/include/bits/sigthread.h \
  /usr/include/sys/resource.h /usr/include/bits/resource.h \
  /usr/include/bits/waitflags.h /usr/include/bits/waitstatus.h \
- /usr/include/netdb.h /usr/include/netinet/in.h /usr/include/stdint.h \
- /usr/include/bits/wchar.h /usr/include/bits/in.h \
+ /usr/include/netdb.h /usr/include/netinet/in.h \
+ /usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stdint.h \
+ /usr/include/stdint.h /usr/include/bits/wchar.h /usr/include/bits/in.h \
  /usr/include/rpc/netdb.h /usr/include/bits/netdb.h \
  /usr/include/arpa/inet.h /usr/include/netinet/tcp.h /usr/include/stdio.h \
  /usr/include/libio.h /usr/include/_G_config.h /usr/include/wchar.h \
- /usr/lib/gcc/x86_64-redhat-linux/4.4.7/include/stdarg.h \
+ /usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stdarg.h \
  /usr/include/bits/stdio_lim.h /usr/include/bits/sys_errlist.h \
  /usr/include/bits/stdio.h /usr/include/stdlib.h /usr/include/alloca.h \
  /usr/include/errno.h /usr/include/bits/errno.h \
@@ -36,7 +37,7 @@ testapp.o: testapp.c /usr/include/pthread.h /usr/include/features.h \
  /usr/include/bits/posix_opt.h /usr/include/bits/environments.h \
  /usr/include/bits/confname.h /usr/include/getopt.h /usr/include/fcntl.h \
  /usr/include/bits/fcntl.h /usr/include/bits/stat.h config.h \
- /usr/lib/gcc/x86_64-redhat-linux/4.4.7/include/stdbool.h \
+ /usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stdbool.h \
  /usr/include/inttypes.h cache.h util.h protocol_binary.h
 
 /usr/include/pthread.h:
@@ -63,7 +64,7 @@ testapp.o: testapp.c /usr/include/pthread.h /usr/include/features.h \
 
 /usr/include/bits/typesizes.h:
 
-/usr/lib/gcc/x86_64-redhat-linux/4.4.7/include/stddef.h:
+/usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stddef.h:
 
 /usr/include/time.h:
 
@@ -135,6 +136,8 @@ testapp.o: testapp.c /usr/include/pthread.h /usr/include/features.h \
 
 /usr/include/netinet/in.h:
 
+/usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stdint.h:
+
 /usr/include/stdint.h:
 
 /usr/include/bits/wchar.h:
@@ -157,7 +160,7 @@ testapp.o: testapp.c /usr/include/pthread.h /usr/include/features.h \
 
 /usr/include/wchar.h:
 
-/usr/lib/gcc/x86_64-redhat-linux/4.4.7/include/stdarg.h:
+/usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stdarg.h:
 
 /usr/include/bits/stdio_lim.h:
 
@@ -207,7 +210,7 @@ testapp.o: testapp.c /usr/include/pthread.h /usr/include/features.h \
 
 config.h:
 
-/usr/lib/gcc/x86_64-redhat-linux/4.4.7/include/stdbool.h:
+/usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stdbool.h:
 
 /usr/include/inttypes.h:
 
