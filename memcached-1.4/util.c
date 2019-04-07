@@ -5,6 +5,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
+#include <ctype.h>
 
 #include "memcached.h"
 

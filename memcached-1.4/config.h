@@ -5,7 +5,7 @@
 /* #undef ENABLE_DTRACE */
 
 /* Set to nonzero if you want to include SASL */
-/* #undef ENABLE_SASL */
+#define ENABLE_SASL 1
 
 /* Set to nonzero if you want to enable a SASL pwdb */
 /* #undef ENABLE_SASL_PWDB */
@@ -47,7 +47,7 @@
 #define HAVE_MLOCKALL 1
 
 /* we have sasl_callback_ft */
-/* #undef HAVE_SASL_CALLBACK_FT */
+#define HAVE_SASL_CALLBACK_FT 1
 
 /* Set to nonzero if your SASL implementation supports SASL_CB_GETCONF */
 /* #undef HAVE_SASL_CB_GETCONF */

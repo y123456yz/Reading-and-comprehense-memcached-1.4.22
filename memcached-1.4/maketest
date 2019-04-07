@@ -1,0 +1,9 @@
+[root@master memcached-1.4]# ps -ef | grep app && ps -ef | grep mem
+root     23526 23523  4 11:08 pts/0    00:00:00 ./testapp
+root     23554 23193  0 11:08 pts/3    00:00:00 grep --color=auto app
+memcach+ 19594     1  0 Feb12 ?        00:00:02 /usr/bin/memcached -u memcached -p 11211 -m 64 -c 1024
+root     23527 23526  0 11:08 pts/0    00:00:00 [memcached-debug] <defunct>
+root     23546 23526  0 11:08 pts/0    00:00:00 ./timedrun 600 ./memcached-debug -A -p -1 -U 0 -u root
+root     23547 23546  1 11:08 pts/0    00:00:00 ./memcached-debug -A -p -1 -U 0 -u root
+root     23556 23193  0 11:08 pts/3    00:00:00 grep --color=auto mem
+

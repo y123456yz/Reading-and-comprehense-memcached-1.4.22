@@ -74,17 +74,17 @@ am__installdirs = "$(DESTDIR)$(man1dir)"
 NROFF = nroff
 MANS = $(man_MANS)
 DISTFILES = $(DIST_COMMON) $(DIST_SOURCES) $(TEXINFOS) $(EXTRA_DIST)
-ACLOCAL = ${SHELL} /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run aclocal-1.11
-AMTAR = ${SHELL} /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run tar
-AUTOCONF = ${SHELL} /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run autoconf
-AUTOHEADER = ${SHELL} /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run autoheader
-AUTOMAKE = ${SHELL} /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run automake-1.11
+ACLOCAL = ${SHELL} /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run aclocal-1.11
+AMTAR = ${SHELL} /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run tar
+AUTOCONF = ${SHELL} /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run autoconf
+AUTOHEADER = ${SHELL} /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run autoheader
+AUTOMAKE = ${SHELL} /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run automake-1.11
 AWK = gawk
 CC = gcc -std=gnu99
 CCDEPMODE = depmode=gcc3
 CFLAGS = -g -O2 -pthread -pthread -Wall -Werror -pedantic -Wmissing-prototypes -Wmissing-declarations -Wredundant-decls
 CPP = gcc -E
-CPPFLAGS = 
+CPPFLAGS = -I/usr/local/libevent//include 
 CYGPATH_W = echo
 DEFS = -DHAVE_CONFIG_H
 DEPDIR = .deps
@@ -93,21 +93,21 @@ DTRACEFLAGS =
 ECHO_C = 
 ECHO_N = -n
 ECHO_T = 
-EGREP = /bin/grep -E
+EGREP = /usr/bin/grep -E
 ENABLE_SASL = 
 EXEEXT = 
-GREP = /bin/grep
+GREP = /usr/bin/grep
 INSTALL = /usr/bin/install -c
 INSTALL_DATA = ${INSTALL} -m 644
 INSTALL_PROGRAM = ${INSTALL}
 INSTALL_SCRIPT = ${INSTALL}
 INSTALL_STRIP_PROGRAM = $(install_sh) -c -s
-LDFLAGS = 
+LDFLAGS = -L/usr/local/libevent//lib  -Wl,-rpath,/usr/local/libevent//lib
 LIBOBJS = 
-LIBS = -levent -lrt 
+LIBS = -levent -lsasl2 
 LTLIBOBJS = 
-MAKEINFO = ${SHELL} /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run makeinfo
-MKDIR_P = /bin/mkdir -p
+MAKEINFO = ${SHELL} /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/missing --run makeinfo
+MKDIR_P = /usr/bin/mkdir -p
 OBJEXT = o
 PACKAGE = memcached
 PACKAGE_BUGREPORT = memcached@googlegroups.com
@@ -117,7 +117,7 @@ PACKAGE_TARNAME = memcached
 PACKAGE_URL = 
 PACKAGE_VERSION = 1.4.21
 PATH_SEPARATOR = :
-PROFILER = /usr/local/gcc-4.8.4/bin//gcov
+PROFILER = /usr/bin/gcov
 PROFILER_FLAGS = -fprofile-arcs -ftest-coverage
 PROFILER_LDFLAGS = -lgcov
 SET_MAKE = 
@@ -126,10 +126,10 @@ STRIP =
 VERSION = 1.4.21
 XML2RFC = no
 XSLTPROC = /usr/bin/xsltproc
-abs_builddir = /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc
-abs_srcdir = /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc
-abs_top_builddir = /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4
-abs_top_srcdir = /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4
+abs_builddir = /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc
+abs_srcdir = /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc
+abs_top_builddir = /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4
+abs_top_srcdir = /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4
 ac_ct_CC = gcc
 am__include = include
 am__leading_dot = .
@@ -156,13 +156,13 @@ host_vendor = unknown
 htmldir = ${docdir}
 includedir = ${prefix}/include
 infodir = ${datarootdir}/info
-install_sh = ${SHELL} /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/install-sh
+install_sh = ${SHELL} /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/install-sh
 libdir = ${exec_prefix}/lib
 libexecdir = ${exec_prefix}/libexec
 localedir = ${datarootdir}/locale
 localstatedir = ${prefix}/var
 mandir = ${datarootdir}/man
-mkdir_p = /bin/mkdir -p
+mkdir_p = /usr/bin/mkdir -p
 oldincludedir = /usr/include
 pdfdir = ${docdir}
 prefix = /usr/local
@@ -425,10 +425,10 @@ uninstall-man: uninstall-man1
 
 
 protocol-binary.txt: $(.TARGET:R).full
-	no -c /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc $(.TARGET:R).full $@
+	no -c /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc $(.TARGET:R).full $@
 
 protocol-binary-range.txt: $(.TARGET:R).full
-	no -c /root/yangyazhou/reading-and-annotate-quic/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc $(.TARGET:R).full $@
+	no -c /yangyazhou/Reading-and-comprehense-memcached-1.4.22/memcached-1.4/doc $(.TARGET:R).full $@
 
 protocol-binary.full: $(.TARGET:R).xml xml2rfc/rfc2629-noinc.xsl
 	/usr/bin/xsltproc --nonet xml2rfc/rfc2629-noinc.xsl $(.TARGET:R).xml > $@

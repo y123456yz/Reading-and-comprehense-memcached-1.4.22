@@ -1761,6 +1761,7 @@ static void bin_list_sasl_mechs(conn *c) {
         write_bin_error(c, PROTOCOL_BINARY_RESPONSE_AUTH_ERROR, NULL, 0);
         return;
     }
+    printf("yang test  bin list\r\n");
     write_bin_response(c, (char*)result_string, 0, 0, string_length);
 }
 
@@ -1861,6 +1862,7 @@ static void process_bin_complete_sasl_auth(conn *c) {
         pthread_mutex_unlock(&c->thread->stats.mutex);
         break;
     case SASL_CONTINUE:
+        printf("yang test 1111111111111111111111111111111111111\r\n");
         add_bin_header(c, PROTOCOL_BINARY_RESPONSE_AUTH_CONTINUE, 0, 0, outlen);
         if(outlen > 0) {
             add_iov(c, out, outlen);
@@ -1912,6 +1914,7 @@ static void dispatch_bin_command(conn *c) {
     if (settings.sasl && !authenticated(c)) {
         write_bin_error(c, PROTOCOL_BINARY_RESPONSE_AUTH_ERROR, NULL, 0);
         c->write_and_go = conn_closing;
+        printf("yang test dispatch_bin_command failed\r\n");
         return;
     }
 
@@ -2054,6 +2057,7 @@ static void dispatch_bin_command(conn *c) {
             }
             break;
         case PROTOCOL_BINARY_CMD_SASL_LIST_MECHS:
+        printf("yang test 222222222222222222222 extlen:%d, keylen:%d  %d\r\n", extlen, keylen, bodylen);
             if (extlen == 0 && keylen == 0 && bodylen == 0) {
                 bin_list_sasl_mechs(c);
             } else {
@@ -2062,6 +2066,7 @@ static void dispatch_bin_command(conn *c) {
             break;
         case PROTOCOL_BINARY_CMD_SASL_AUTH:
         case PROTOCOL_BINARY_CMD_SASL_STEP:
+            printf("yang test 222222222222222222222 extlen:%d, keylen:%d\r\n", extlen, keylen);
             if (extlen == 0 && keylen != 0) {
                 bin_read_key(c, bin_reading_sasl_auth, 0);
             } else {
@@ -2392,8 +2397,6 @@ enum store_item_type do_store_item(item *it, int comm, conn *c, const uint32_t h
     item *new_it = NULL;
     int flags;
 
-    if(old_it)
-        printf("yang test ...........refcount:%d............<FUNC:%s, line:%u>\n", (int)old_it->refcount, __FUNCTION__, __LINE__);
     if (old_it != NULL && comm == NREAD_ADD) { //
         //因为已经有相同键值的旧item了，所以add命令使用失败。但  
         //还是会刷新旧item的访问时间以及LRU队列中的位置  
@@ -3937,6 +3940,7 @@ static int try_read_command(conn *c) {
     assert(c->rcurr <= (c->rbuf + c->rsize));
     assert(c->rbytes > 0);
 
+    printf("yang test ....protocol:%d\r\n", c->protocol);
     if (c->protocol == negotiating_prot || c->transport == udp_transport)  {
         if ((unsigned char)c->rbuf[0] == (unsigned char)PROTOCOL_BINARY_REQ) {
             c->protocol = binary_prot;
@@ -3950,7 +3954,7 @@ static int try_read_command(conn *c) {
         }
     }
 
-    printf("yang test ....protocol:%d. %s\n", c->protocol, c->rcurr);
+    printf("yang test ....protocol:%d. %s\r\n", c->protocol, c->rcurr);
     if (c->protocol == binary_prot) {
         /* Do we have the complete packet header? */
         if (c->rbytes < sizeof(c->binary_header)) {

@@ -78,6 +78,7 @@ static int spawn_and_wait(char **argv)
         rv = EX_OSERR;
         break; /* NOTREACHED */
     case 0:
+        //   ./timedrun 600 ./memcached-debug -A -p -1 -U 0 -u root
         execvp(argv[0], argv);
         perror("exec");
         rv = EX_SOFTWARE;
@@ -100,3 +101,4 @@ int main(int argc, char **argv)
 
     return spawn_and_wait(argv+2);
 }
+

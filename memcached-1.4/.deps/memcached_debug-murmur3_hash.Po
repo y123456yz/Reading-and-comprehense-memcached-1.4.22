@@ -1,13 +1,16 @@
-memcached_debug-murmur3_hash.o: murmur3_hash.c murmur3_hash.h \
- /usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stdint.h \
+memcached_debug-murmur3_hash.o: murmur3_hash.c /usr/include/stdc-predef.h \
+ murmur3_hash.h \
+ /usr/local/lib/gcc/x86_64-unknown-linux-gnu/5.4.0/include/stdint.h \
  /usr/include/stdint.h /usr/include/features.h /usr/include/sys/cdefs.h \
  /usr/include/bits/wordsize.h /usr/include/gnu/stubs.h \
  /usr/include/gnu/stubs-64.h /usr/include/bits/wchar.h \
- /usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stddef.h
+ /usr/local/lib/gcc/x86_64-unknown-linux-gnu/5.4.0/include/stddef.h
+
+/usr/include/stdc-predef.h:
 
 murmur3_hash.h:
 
-/usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stdint.h:
+/usr/local/lib/gcc/x86_64-unknown-linux-gnu/5.4.0/include/stdint.h:
 
 /usr/include/stdint.h:
 
@@ -23,4 +26,4 @@ murmur3_hash.h:
 
 /usr/include/bits/wchar.h:
 
-/usr/local/gcc-4.8.4/lib/gcc/x86_64-unknown-linux-gnu/4.8.4/include/stddef.h:
+/usr/local/lib/gcc/x86_64-unknown-linux-gnu/5.4.0/include/stddef.h:
